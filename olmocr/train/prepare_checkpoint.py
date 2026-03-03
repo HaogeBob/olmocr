@@ -536,8 +536,9 @@ def prepare_checkpoints(sources: list[str], dest_path: str) -> None:
         raise ValueError("Unable to determine the architecture of the prepared checkpoint.")
 
     hf_model_id = HF_MODEL_IDS[final_architecture]
-    hf_base_url = f"https://huggingface.co/{hf_model_id}/resolve/main"
-    print(f"Using HuggingFace model: {hf_model_id}")
+    hf_endpoint = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
+    hf_base_url = f"{hf_endpoint}/{hf_model_id}/resolve/main"
+    print(f"Using HuggingFace model: {hf_model_id} from {hf_endpoint}")
 
     # Download tokenizer files from Hugging Face
     print("\nDownloading tokenizer files from Hugging Face...")

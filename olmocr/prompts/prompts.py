@@ -71,6 +71,7 @@ class PageResponse:
     is_table: bool
     is_diagram: bool
     natural_text: Optional[str]
+    is_text_clear: bool = True
 
     def __post_init__(self):
         # Validate rotation_correction is one of the allowed values
@@ -90,6 +91,8 @@ class PageResponse:
             raise TypeError("is_diagram must be of type bool.")
         if not isinstance(self.natural_text, (str, type(None))):
             raise TypeError("natural_text must be of type Optional[str].")
+        if not isinstance(self.is_text_clear, bool):
+            raise TypeError("is_text_clear must be of type bool.")
 
 
 def openai_response_format_schema() -> dict:
@@ -100,6 +103,10 @@ def openai_response_format_schema() -> dict:
             "schema": {
                 "type": "object",
                 "properties": {
+                    "is_text_clear": {
+                        "type": "boolean",
+                        "description": "Is the text clear enough to read?",
+                    },
                     "primary_language": {
                         "type": ["string", "null"],
                         "description": "The primary language of the text using two-letter codes or null if there is no text at all that you think you should read.",
@@ -129,6 +136,7 @@ def openai_response_format_schema() -> dict:
                 },
                 "additionalProperties": False,
                 "required": [
+                    "is_text_clear",
                     "primary_language",
                     "is_rotation_valid",
                     "rotation_correction",
@@ -157,7 +165,7 @@ def build_no_anchoring_yaml_prompt() -> str:
     return (
         "Attached is one page of a document that you must process. "
         "Just return the plain text representation of this document as if you were reading it naturally. Convert equations to LateX and tables to markdown.\n"
-        "Return your output as markdown, with a front matter section on top specifying values for the primary_language, is_rotation_valid, rotation_correction, is_table, and is_diagram parameters."
+        "Return your output as markdown, with a front matter section on top specifying values for the is_text_clear, primary_language, is_rotation_valid, rotation_correction, is_table, and is_diagram parameters."
     )
 
 
@@ -166,7 +174,7 @@ def build_no_anchoring_v4_yaml_prompt() -> str:
         "Attached is one page of a document that you must process. "
         "Just return the plain text representation of this document as if you were reading it naturally. Convert equations to LateX and tables to HTML.\n"
         "If there are any figures or charts, label them with the following markdown syntax ![Alt text describing the contents of the figure](page_startx_starty_width_height.png)\n"
-        "Return your output as markdown, with a front matter section on top specifying values for the primary_language, is_rotation_valid, rotation_correction, is_table, and is_diagram parameters."
+        "Return your output as markdown, with a front matter section on top specifying values for the is_text_clear, primary_language, is_rotation_valid, rotation_correction, is_table, and is_diagram parameters."
     )
 
 

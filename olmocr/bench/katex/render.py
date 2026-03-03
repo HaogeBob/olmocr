@@ -47,14 +47,16 @@ class EquationCache:
             conn = sqlite3.connect(self.db_path)
             c = conn.cursor()
             # Added an 'error' column to store rendering errors
-            c.execute("""
+            c.execute(
+                """
                 CREATE TABLE IF NOT EXISTS equations (
                     eq_hash TEXT PRIMARY KEY,
                     mathml TEXT,
                     spans TEXT,
                     error TEXT
                 )
-            """)
+            """
+            )
             conn.commit()
             conn.close()
 
@@ -280,7 +282,8 @@ def _do_render(context, equation, bg_color, text_color, font_size, debug_dom):
         raise RuntimeError("KaTeX library failed to load. Check your katex.min.js file.")
 
     try:
-        error_message = page.evaluate(f"""
+        error_message = page.evaluate(
+            f"""
         () => {{
             try {{
                 katex.render({escaped_equation}, document.getElementById("equation-container"), {{
@@ -293,7 +296,8 @@ def _do_render(context, equation, bg_color, text_color, font_size, debug_dom):
                 return error.message;
             }}
         }}
-        """)
+        """
+        )
     except PlaywrightError as ex:
         print(escaped_equation)
         error_message = str(ex)
@@ -310,16 +314,19 @@ def _do_render(context, equation, bg_color, text_color, font_size, debug_dom):
     page.wait_for_selector(".katex", state="attached", timeout=0)
 
     if debug_dom:
-        katex_dom_html = page.evaluate("""
+        katex_dom_html = page.evaluate(
+            """
         () => {
             return document.getElementById("equation-container").innerHTML;
         }
-        """)
+        """
+        )
         print("\n===== KaTeX DOM HTML =====")
         print(katex_dom_html)
 
     # Extract inner-most spans with non-whitespace text.
-    spans_info = page.evaluate("""
+    spans_info = page.evaluate(
+        """
     () => {
         const spans = Array.from(document.querySelectorAll('span'));
         const list = [];
@@ -339,19 +346,22 @@ def _do_render(context, equation, bg_color, text_color, font_size, debug_dom):
         });
         return list;
     }
-    """)
+    """
+    )
 
     if debug_dom:
         print("\n===== Extracted Span Information =====")
         print(spans_info)
 
     # Extract MathML output (if available) from the KaTeX output.
-    mathml = page.evaluate("""
+    mathml = page.evaluate(
+        """
         () => {
             const mathElem = document.querySelector('.katex-mathml math');
             return mathElem ? mathElem.outerHTML : "";
         }
-        """)
+        """
+    )
 
     page.close()
 

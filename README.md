@@ -213,12 +213,15 @@ pip install olmocr[gpu]  --extra-index-url https://download.pytorch.org/whl/cu12
 pip install https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.5%2Bcu128torch2.7-cp38-abi3-linux_x86_64.whl
 ```
 
+<<<<<<< HEAD
 Also, if you run into errors about `too many open files`, please update your ulimit accordingly:
 
 ```bash
 ulimit -n 65536
 ```
 
+=======
+>>>>>>> 69f4293 (add metrics, add is_text_clear)
 ### Local Usage Example
 
 For quick testing, try the [web demo](https://olmocr.allen.ai/). To run locally, a GPU is required, as inference is powered by [sglang](https://github.com/sgl-project/sglang) under the hood.

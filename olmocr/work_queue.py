@@ -184,12 +184,7 @@ class WorkQueue:
             except QueueEmpty:
                 return None
 
-            if work_item.hash in self._completed_hash_cache:
-                logger.debug(f"Work item {work_item.hash} already completed (cache hit), skipping")
-                self._queue.task_done()
-                continue
-
-            if await self.backend.is_completed(work_item.hash):
+            if work_item.hash in self._completed_hash_cache or await self.backend.is_completed(work_item.hash):
                 logger.debug(f"Work item {work_item.hash} already completed, skipping")
                 self._queue.task_done()
 

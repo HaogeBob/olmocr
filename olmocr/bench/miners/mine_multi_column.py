@@ -201,7 +201,8 @@ async def render_pdf_with_playwright(html_content, output_pdf_path, png_width, p
                 await page.add_script_tag(path=katex_js_path)
                 await page.add_script_tag(path=katex_autorender_js_path)
 
-                await page.evaluate("""
+                await page.evaluate(
+                    """
                     renderMathInElement(document.body, {
                         delimiters: [
                             {left: '\\\$begin:math:text$', right: '\\\\\\$end:math:text$', display: false},
@@ -209,7 +210,8 @@ async def render_pdf_with_playwright(html_content, output_pdf_path, png_width, p
                         ],
                         throwOnError: false
                     });
-                    """)
+                    """
+                )
 
                 await page.pdf(path=output_pdf_path, scale=scale, print_background=True)
                 await browser.close()

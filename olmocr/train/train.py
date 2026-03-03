@@ -10,8 +10,9 @@ import shutil
 from typing import Any, Dict, Optional
 
 import numpy as np
+import yaml
 import torch
-import wandb
+from torch.utils.tensorboard import SummaryWriter
 from torch.amp import autocast
 from torch.optim import AdamW
 from torch.utils.data import ConcatDataset, DataLoader
@@ -141,6 +142,7 @@ def save_checkpoint(
     best_metric: float,
     output_dir: str,
     save_total_limit: Optional[int] = None,
+    is_best: bool = False,
 ):
     """Save model, optimizer, scheduler, and training state."""
     checkpoint_dir = os.path.join(output_dir, f"checkpoint-{global_step}")
@@ -164,9 +166,19 @@ def save_checkpoint(
 
     logger.info(f"Saved checkpoint to {checkpoint_dir}")
 
+    if is_best:
+        best_dir = os.path.join(output_dir, "checkpoint-best")
+        if os.path.exists(best_dir):
+            shutil.rmtree(best_dir)
+        try:
+            shutil.copytree(checkpoint_dir, best_dir)
+            logger.info(f"Saved best checkpoint to {best_dir}")
+        except Exception as e:
+            logger.error(f"Failed to save best checkpoint: {e}")
+
     # Enforce save_total_limit by removing oldest checkpoints
     if save_total_limit is not None and save_total_limit > 0:
-        checkpoints = sorted([d for d in os.listdir(output_dir) if d.startswith("checkpoint-")], key=lambda x: int(x.split("-")[1]))
+        checkpoints = sorted([d for d in os.listdir(output_dir) if d.startswith("checkpoint-") and "best" not in d], key=lambda x: int(x.split("-")[1]))
         while len(checkpoints) > save_total_limit:
             oldest = checkpoints.pop(0)
             shutil.rmtree(os.path.join(output_dir, oldest))
@@ -203,7 +215,8 @@ def load_checkpoint(
     else:
         model = model_class.from_pretrained(checkpoint_dir, **init_kwargs)
 
-    model.to(device)
+    if init_kwargs.get("device_map") is None:
+        model.to(device)
 
     optimizer.load_state_dict(torch.load(os.path.join(checkpoint_dir, "optimizer.pt"), map_location=device))
     lr_scheduler.load_state_dict(torch.load(os.path.join(checkpoint_dir, "scheduler.pt"), map_location=device))
@@ -213,10 +226,90 @@ def load_checkpoint(
     return model, state
 
 
+def levenshtein_distance(s1, s2):
+    """Compute the Levenshtein distance between two strings."""
+    if len(s1) < len(s2):
+        return levenshtein_distance(s2, s1)
+
+    if len(s2) == 0:
+        return len(s1)
+
+    previous_row = range(len(s2) + 1)
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+
+    return previous_row[-1]
+
+
+def calculate_char_accuracy(pred: str, label: str) -> float:
+    """
+    基于匹配字符数 + label 长度计算 acc_label。
+    acc_label: 匹配字符数 / len(label)
+    """
+    from difflib import SequenceMatcher
+    
+    # 移除所有空白字符进行比较
+    pred = pred.replace(" ", "").replace("\n", "").replace("\t", "")
+    label = label.replace(" ", "").replace("\n", "").replace("\t", "")
+
+    len_label = len(label)
+
+    if len_label == 0:
+        # 如果标签为空，且预测也为空，则完全匹配（1.0），否则不匹配（0.0）
+        # 但通常印章标签不为空。如果为空，视具体情况而定。
+        # 这里假设标签为空时，如果预测也为空则给1分。
+        return 1.0 if len(pred) == 0 else 0.0
+
+    matcher = SequenceMatcher(None, pred, label)
+    match_cnt = 0
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            match_cnt += (i2 - i1)
+
+    acc_label = match_cnt / len_label if len_label > 0 else 0.0
+    return acc_label
+
+
+def _extract_front_matter_and_text(markdown_content: str) -> tuple[Dict[str, Any], str]:
+    """Extract YAML front matter and body text from markdown content."""
+    if markdown_content.startswith("---\n"):
+        try:
+            end_index = markdown_content.find("\n---", 4)
+            if end_index != -1:
+                front_matter_str = markdown_content[4:end_index]
+                text = markdown_content[end_index + 4 :].strip()
+                front_matter = yaml.safe_load(front_matter_str) or {}
+                return front_matter, text
+        except yaml.YAMLError:
+            pass
+    return {}, markdown_content.strip()
+
+
+def _parse_is_text_clear(front_matter: Dict[str, Any]) -> Optional[bool]:
+    value = front_matter.get("is_text_clear", None)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, np.integer)):
+        if value in {0, 1}:
+            return bool(value)
+    if isinstance(value, str):
+        lower = value.strip().lower()
+        if lower in {"true", "false"}:
+            return lower == "true"
+    return None
+
+
 def evaluate_model(
     model: torch.nn.Module,
     eval_dataloaders: Dict[str, DataLoader],
     device: torch.device,
+    processor: Optional[Any] = None,
 ) -> Dict[str, float]:
     """Evaluate on all eval datasets and return average loss per dataset."""
     model.eval()
@@ -224,22 +317,114 @@ def evaluate_model(
 
     for dataset_name, dataloader in eval_dataloaders.items():
         total_loss = 0.0
+        total_match_rate = 0.0
+        total_char_acc = 0.0
+        total_text_clear = 0
+        correct_text_clear = 0
         num_batches = 0
+        num_gen_samples = 0
 
         with torch.no_grad():
             for batch in dataloader:
                 # Skip if batch is None (all samples were filtered out)
                 if batch is None:
                     continue
+                
                 batch = {k: v.to(device) for k, v in batch.items()}
+                
+                # Compute Loss
                 with autocast(device_type="cuda", enabled=True, dtype=torch.bfloat16):
                     outputs = model(**batch)
                 total_loss += outputs.loss.item()
                 num_batches += 1
 
+                # Compute Character Match Rate and Char Acc (if processor provided)
+                if processor is not None:
+                    # Assuming batch_size=1 and finding prompt/response split based on labels
+                    # labels are -100 for prompt, valid ids for response
+                    input_ids = batch["input_ids"]
+                    labels = batch["labels"]
+                    
+                    for i in range(len(input_ids)): # Iterate over batch (likely 1)
+                        lbl = labels[i]
+                        # Find start of response (first non -100)
+                        # We look for the first index where label is NOT -100
+                        valid_indices = (lbl != -100).nonzero(as_tuple=True)[0]
+                        if len(valid_indices) > 0:
+                            start_idx = valid_indices[0].item()
+                            
+                            # Prepare generation inputs (prompt only)
+                            # We keep image inputs as is
+                            prompt_ids = input_ids[i:i+1, :start_idx]
+                            prompt_mask = batch["attention_mask"][i:i+1, :start_idx]
+                            
+                            gen_kwargs = {
+                                "input_ids": prompt_ids,
+                                "attention_mask": prompt_mask,
+                                "max_new_tokens": 512, # Reasonable limit
+                                "use_cache": True,
+                            }
+                            if "pixel_values" in batch:
+                                gen_kwargs["pixel_values"] = batch["pixel_values"][i:i+1]
+                            if "image_grid_thw" in batch:
+                                gen_kwargs["image_grid_thw"] = batch["image_grid_thw"][i:i+1]
+                                
+                            # Generate
+                            with autocast(device_type="cuda", enabled=True, dtype=torch.bfloat16):
+                                generated_ids = model.generate(**gen_kwargs)
+                            
+                            # Decode Predicted
+                            # generated_ids contains prompt + new tokens. We want new tokens.
+                            # Usually input length < output length, but if prompt_ids was used, 
+                            # generated_ids starts with prompt_ids.
+                            new_tokens = generated_ids[0, start_idx:]
+                            pred_text = processor.decode(new_tokens, skip_special_tokens=True)
+                            
+                            # Decode Target
+                            # Use labels where valid
+                            target_ids = lbl[lbl != -100]
+                            target_text = processor.decode(target_ids, skip_special_tokens=True)
+
+                            pred_front_matter, pred_body = _extract_front_matter_and_text(pred_text)
+                            target_front_matter, target_body = _extract_front_matter_and_text(target_text)
+
+                            pred_is_text_clear = _parse_is_text_clear(pred_front_matter)
+                            target_is_text_clear = _parse_is_text_clear(target_front_matter)
+                            if isinstance(target_is_text_clear, bool):
+                                total_text_clear += 1
+                                if pred_is_text_clear is not None and pred_is_text_clear == target_is_text_clear:
+                                    correct_text_clear += 1
+                            
+                            # Calculate Metric (Levenshtein based Match Rate)
+                            dist = levenshtein_distance(pred_body, target_body)
+                            max_len = max(len(target_body), 1)
+                            match_rate = max(0.0, 1.0 - (dist / max_len))
+
+                            # Calculate Char Accuracy (SequenceMatcher based)
+                            char_acc = calculate_char_accuracy(pred_body, target_body)
+                            
+                            total_match_rate += match_rate
+                            total_char_acc += char_acc
+                            num_gen_samples += 1
+
         avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
         eval_metrics[f"eval_{dataset_name}_loss"] = avg_loss
         logger.info(f"Eval {dataset_name} loss: {avg_loss:.4f}")
+        
+        if num_gen_samples > 0:
+            avg_match_rate = total_match_rate / num_gen_samples
+            avg_char_acc = total_char_acc / num_gen_samples
+            
+            # Original metric
+            eval_metrics[f"eval_{dataset_name}_match_rate"] = avg_match_rate
+            # New metric
+            eval_metrics[f"eval_{dataset_name}_char_acc"] = avg_char_acc
+            if total_text_clear > 0:
+                eval_metrics[f"eval_{dataset_name}_is_text_clear_acc"] = correct_text_clear / total_text_clear
+                logger.info(f"Eval {dataset_name} is_text_clear_acc: {eval_metrics[f'eval_{dataset_name}_is_text_clear_acc']:.4f}")
+            
+            logger.info(f"Eval {dataset_name} match_rate: {avg_match_rate:.4f}")
+            logger.info(f"Eval {dataset_name} char_acc: {avg_char_acc:.4f}")
 
     # Compute overall eval loss as average across datasets (or customize as needed)
     if eval_metrics:
@@ -311,9 +496,12 @@ def main():
         os.environ["WANDB_PROJECT"] = config.project_name
         logger.info(f"Setting WANDB_PROJECT to: {config.project_name}")
 
-    # Initialize wandb if reporting to it
-    if "wandb" in config.training.report_to:
-        wandb.init(project=config.project_name, name=config.run_name, config=config.to_dict())
+    # Initialize tensorboard writer
+    writer = None
+    if "wandb" in config.training.report_to or "tensorboard" in config.training.report_to:
+        log_dir = os.path.join(config.training.output_dir, config.run_name, "logs")
+        writer = SummaryWriter(log_dir=log_dir)
+        logger.info(f"Initialized TensorBoard writer at {log_dir}")
 
     # Load processor for tokenization
     logger.info(f"Loading processor: {config.model.name}")
@@ -331,7 +519,7 @@ def main():
 
     # Load model
     logger.info(f"Loading model: {config.model.name}")
-    if "qwen2.5-vl" in config.model.name.lower() or "olmocr-2-7b-1025" in config.model.name.lower():
+    if "qwen2.5-vl" in config.model.name.lower() or "olmocr" in config.model.name.lower():
         model_class = Qwen2_5_VLForConditionalGeneration
         model = model_class.from_pretrained(config.model.name, **model_init_kwargs)
     elif "qwen2-vl" in config.model.name.lower():
@@ -401,7 +589,7 @@ def main():
     found_resumable_checkpoint = None
     if os.path.exists(full_output_dir):
         # Look for checkpoint directories
-        checkpoint_dirs = [d for d in os.listdir(full_output_dir) if d.startswith("checkpoint-") and os.path.isdir(os.path.join(full_output_dir, d))]
+        checkpoint_dirs = [d for d in os.listdir(full_output_dir) if d.startswith("checkpoint-") and "best" not in d and os.path.isdir(os.path.join(full_output_dir, d))]
         if checkpoint_dirs:
             # Sort by checkpoint number and get the latest
             checkpoint_dirs.sort(key=lambda x: int(x.split("-")[1]))
@@ -424,7 +612,8 @@ def main():
 
     # Device setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
+    if config.model.device_map is None:
+        model.to(device)
 
     # Apply torch compile if enabled
     if config.training.torch_compile:
@@ -560,10 +749,11 @@ def main():
     }
 
     # Always evaluate on start
-    metrics = evaluate_model(model, eval_dataloaders, device)
+    metrics = evaluate_model(model, eval_dataloaders, device, processor=processor)
     logger.info(f"Initial evaluation: {metrics}")
-    if "wandb" in config.training.report_to:
-        wandb.log(metrics, step=global_step)
+    if writer:
+        for k, v in metrics.items():
+            writer.add_scalar(k, v, global_step)
 
     # Main training loop
     current_epoch = samples_seen / len(train_dataset)
@@ -675,34 +865,41 @@ def main():
                         "samples_seen": samples_seen,
                     }
                     logger.info(f"Step {global_step}: epoch={current_epoch:.3f}, loss={avg_train_loss:.4f}, lr={lr_scheduler.get_last_lr()[0]:.2e}")
-                    if "wandb" in config.training.report_to:
-                        wandb.log(logs, step=global_step)
+                    if writer:
+                        for k, v in logs.items():
+                            writer.add_scalar(k, v, global_step)
 
                     accumulated_loss = 0.0
                     num_losses_accumulated = 0
 
                 # Evaluation
                 if config.training.eval_steps > 0 and global_step % config.training.eval_steps == 0 and global_step > 0:
-                    metrics = evaluate_model(model, eval_dataloaders, device)
+                    metrics = evaluate_model(model, eval_dataloaders, device, processor=processor)
                     logger.info(f"Evaluation at step {global_step}: {metrics}")
-                    if "wandb" in config.training.report_to:
-                        wandb.log(metrics, step=global_step)
+                    if writer:
+                        for k, v in metrics.items():
+                            writer.add_scalar(k, v, global_step)
 
                     # Update best metric
                     current_metric = metrics.get(config.training.metric_for_best_model, None)
+                    is_best = False
                     if current_metric is not None:
                         if (config.training.greater_is_better and current_metric > best_metric) or (
                             not config.training.greater_is_better and current_metric < best_metric
                         ):
                             best_metric = current_metric
+                            is_best = True
+                            logger.info(f"New best metric: {best_metric}")
 
                     # Return to training mode
                     model.train()
+                else:
+                    is_best = False
 
                 # Saving
-                if config.training.save_steps > 0 and global_step % config.training.save_steps == 0:
+                if (config.training.save_steps > 0 and global_step % config.training.save_steps == 0) or is_best:
                     save_checkpoint(
-                        model, optimizer, lr_scheduler, current_epoch, global_step, samples_seen, best_metric, full_output_dir, config.training.save_total_limit
+                        model, optimizer, lr_scheduler, current_epoch, global_step, samples_seen, best_metric, full_output_dir, config.training.save_total_limit, is_best=is_best
                     )
 
             # Check if we've reached our training limit
@@ -721,11 +918,12 @@ def main():
     logger.info(f"Training completed at epoch {final_epoch:.3f}, step {global_step}, samples {samples_seen}")
 
     # Final evaluation
-    final_metrics = evaluate_model(model, eval_dataloaders, device)
+    final_metrics = evaluate_model(model, eval_dataloaders, device, processor=processor)
     logger.info(f"Final evaluation metrics: {final_metrics}")
-    if "wandb" in config.training.report_to:
-        wandb.log(final_metrics, step=global_step)
-        wandb.finish()
+    if writer:
+        for k, v in final_metrics.items():
+            writer.add_scalar(k, v, global_step)
+        writer.close()
 
 
 if __name__ == "__main__":

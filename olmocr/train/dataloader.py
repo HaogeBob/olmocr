@@ -7,7 +7,7 @@ import re
 import shutil
 from abc import ABC, abstractmethod
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import dataclass, fields, replace
+from dataclasses import MISSING, dataclass, fields, replace
 from html.parser import HTMLParser
 from io import BytesIO
 from os import PathLike
@@ -222,8 +222,9 @@ class FrontMatterParser(PipelineStep):
         if not self.front_matter_class:
             return front_matter_dict
 
-        # Get field names and types from the dataclass
-        field_info = {f.name: f.type for f in fields(self.front_matter_class)}
+        # Get field names, types, and defaults from the dataclass
+        field_defs = {f.name: f for f in fields(self.front_matter_class)}
+        field_info = {f.name: f.type for f in field_defs.values()}
 
         # Validate and convert values
         kwargs = {}
@@ -234,6 +235,13 @@ class FrontMatterParser(PipelineStep):
                 continue
 
             if field_name not in front_matter_dict:
+                field_def = field_defs[field_name]
+                if field_def.default is not MISSING:
+                    kwargs[field_name] = field_def.default
+                    continue
+                if field_def.default_factory is not MISSING:  # type: ignore[attr-defined]
+                    kwargs[field_name] = field_def.default_factory()  # type: ignore[misc]
+                    continue
                 raise ValueError(f"Missing required field '{field_name}' in front matter")
 
             value = front_matter_dict[field_name]
@@ -334,7 +342,7 @@ class NewYamlFinetuningPromptWithAnchoring(PipelineStep):
             f"Attached is one page of a document, as well as some raw textual content that was previously extracted for it. "
             f"Just return the plain text representation of this document as if you were reading it naturally. Convert equations to LateX and tables to markdown.\n"
             f"RAW_TEXT_START\n{sample['anchor_text']}\nRAW_TEXT_END\n"
-            f"Return your output as markdown, with a front matter section on top specifying values for the primary_language, is_rotation_valid, rotation_correction, is_table, and is_diagram parameters."
+            f"Return your output as markdown, with a front matter section on top specifying values for the is_text_clear, primary_language, is_rotation_valid, rotation_correction, is_table, and is_diagram parameters."
         )
         return sample
 
@@ -356,7 +364,9 @@ class FrontMatterOutputFormat(PipelineStep):
         page_data = sample["page_data"]
         assert type(page_data) is PageResponse
 
-        sample["response"] = f"""---
+        sample["response"] = (
+            f"""---
+is_text_clear: {page_data.is_text_clear}
 primary_language: {page_data.primary_language}
 is_rotation_valid: {page_data.is_rotation_valid}
 rotation_correction: {page_data.rotation_correction}
@@ -365,6 +375,7 @@ is_diagram: {page_data.is_diagram}
 ---
 {page_data.natural_text if page_data.natural_text is not None and len(page_data.natural_text.strip()) > 0 else ""}
 """.strip()
+        )
 
         return sample
 
@@ -379,6 +390,7 @@ class JSONOutputFormat(PipelineStep):
 
         sample["response"] = json.dumps(
             {
+                "is_text_clear": page_data.is_text_clear,
                 "primary_language": page_data.primary_language,
                 "is_rotation_valid": page_data.is_rotation_valid,
                 "rotation_correction": page_data.rotation_correction,
@@ -422,6 +434,7 @@ class LatexBracketNormalizer(PipelineStep):
         # Update the page_data with normalized text
         # Since PageResponse is frozen, we need to create a new instance
         new_page_data = PageResponse(
+            is_text_clear=page_data.is_text_clear,
             primary_language=page_data.primary_language,
             is_rotation_valid=page_data.is_rotation_valid,
             rotation_correction=page_data.rotation_correction,
@@ -483,6 +496,7 @@ class RotationAugmentation(PipelineStep):
             correction = 90
 
         new_page_data = PageResponse(
+            is_text_clear=page_data.is_text_clear,
             primary_language=page_data.primary_language,
             is_rotation_valid=False,  # Mark as invalid since we rotated it
             rotation_correction=correction,  # The correction needed to fix it
@@ -1198,11 +1212,22 @@ class Tokenizer(PipelineStep):
             text=[text],
             images=[main_image],
             padding=True,
-            return_tensors="np",
+            return_tensors="pt",
         )
+        # Convert tensors to numpy arrays as the rest of the pipeline expects numpy
+        if hasattr(inputs, "input_ids") and hasattr(inputs.input_ids, "numpy"):
+            inputs["input_ids"] = inputs.input_ids.numpy()
+        if hasattr(inputs, "pixel_values") and hasattr(inputs.pixel_values, "numpy"):
+            inputs["pixel_values"] = inputs.pixel_values.numpy()
+        if hasattr(inputs, "image_grid_thw") and hasattr(inputs.image_grid_thw, "numpy"):
+            inputs["image_grid_thw"] = inputs.image_grid_thw.numpy()
+        if hasattr(inputs, "attention_mask") and hasattr(inputs.attention_mask, "numpy"):
+            inputs["attention_mask"] = inputs.attention_mask.numpy()
 
         # Get labels by tokenizing the output text
-        labels = self.processor(text=[response], padding=True, return_tensors="np")
+        labels = self.processor(text=[response], padding=True, return_tensors="pt")
+        if hasattr(labels, "input_ids") and hasattr(labels.input_ids, "numpy"):
+            labels["input_ids"] = labels.input_ids.numpy()
 
         # Append end-of-message token to the labels
         end_tokens = self.processor.tokenizer(self.end_of_message_token, add_special_tokens=False)["input_ids"]

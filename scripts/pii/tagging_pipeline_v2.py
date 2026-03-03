@@ -70,106 +70,47 @@ class PIIClassification(BaseModel):
     primary_language: str = Field(..., description="Primary language as a two-letter code")
     document_type: str = Field(..., description="Basic summary of document type classification")
     is_resume_cv: Optional[bool] = Field(None, description="True if the document is a page from a resume or cv")
+
+    is_academic_paper: Optional[bool] = None
+    is_textbook: Optional[bool] = None
+    is_news_article: Optional[bool] = None
+    is_test_or_quiz: Optional[bool] = None
+    is_homework_assignment: Optional[bool] = None
+    is_class_syllabus: Optional[bool] = None
+    is_meeting_minutes: Optional[bool] = None
+    is_legal_contract: Optional[bool] = None
+    is_form: Optional[bool] = None
+    is_correspondence_or_letter: Optional[bool] = None
+    is_public_order: Optional[bool] = None
+    is_court_notice: Optional[bool] = None
+    is_completion_certificate: Optional[bool] = None
+
     contains_pii: Optional[bool] = Field(None, description="True if document contains PII")
 
 
-class RichPIIClassification(BaseModel):
-    primary_language: str = Field(..., description="Primary language as a two-letter code")
-    document_type: str = Field(..., description="Basic summary of document type classification")
-
-    is_public_document: bool = Field(False, description="True if the document is meant for public dissemination")
-
-    contains_pii_government_id: Optional[bool] = Field(None)
-    contains_pii_financial_info: Optional[bool] = Field(None)
-    contains_pii_biometric_data: Optional[bool] = Field(None)
-    contains_pii_login_info: Optional[bool] = Field(None)
-
-    contains_identifier_name: Optional[bool] = Field(None, description="True if the document contains a name")
-    contains_identifier_email: Optional[bool] = Field(None, description="True if the document contains an email address")
-    contains_identifier_phone_number: Optional[bool] = Field(None, description="True if the document contains phone numbers")
-
-    contains_identifier_with_address: Optional[bool] = Field(None)
-    contains_identifier_with_biographical_info: Optional[bool] = Field(None)
-    contains_identifier_with_location_info: Optional[bool] = Field(None)
-    contains_identifier_with_employment_info: Optional[bool] = Field(None)
-    contains_identifier_with_education_info: Optional[bool] = Field(None)
-    contains_identifier_with_medical_info: Optional[bool] = Field(None)
-
-    def contains_any_pii(self) -> bool:
-        if self.is_public_document:
-            return False
-
-        if self.contains_pii_government_id or self.contains_pii_financial_info or self.contains_pii_biometric_data or self.contains_pii_login_info:
-            return True
-
-        if self.contains_identifier_name or self.contains_identifier_email or self.contains_identifier_phone_number:
-            return (
-                self.contains_identifier_with_address
-                or self.contains_identifier_with_biographical_info
-                or self.contains_identifier_with_location_info
-                or self.contains_identifier_with_employment_info
-                or self.contains_identifier_with_education_info
-                or self.contains_identifier_with_medical_info
-            )
-        else:
-            return False
-
-
-async def _process_single_page(page_text: str) -> RichPIIClassification:
+async def _process_single_page(page_text: str) -> PIIClassification:
     """Helper function to process a single document or page."""
-
-    rich_prompt = """You are a document analyzer that identifies Personally Identifiable Information (PII) in documents. 
-Your task is to analyze the document provided below and determine:
-1. Whether the document is intended for public release or dissemination (e.g., research paper, public report, etc.)
-2. If the document contains any PII
-
-For PII identification, follow these specific guidelines:
-
-PII THAT OCCURS EVEN WITHOUT AN IDENTIFIER:
-The following should ALWAYS be marked as PII even if they do not occur alongside an identifier:
-- Government IDs (Social Security Numbers, passport numbers, driver's license numbers, tax IDs)
-- Financial Information (credit card numbers, bank account/routing numbers)
-- Biometric Data (fingerprints, retina scans, facial recognition data, voice signatures)
-- Login information (ONLY mark as PII when a username, password, and login location are present together)
-
-IDENTIFIERS FOR PII:
-The following are considered identifiers that can make information PII:
-- Names (full names, first names, last names, nicknames)
-- Email addresses
-- Phone numbers
-
-PII THAT MUST CO-OCCUR WITH AN IDENTIFIER:
-The following types of information should ONLY be marked as PII if they occur ALONGSIDE an identifier (commonly, a person's name):
-- Addresses (street address, postal code, etc.)
-- Biographical Information (date of birth, place of birth, gender, sexual orientation, race, ethnicity, citizenship/immigration status, religion)
-- Location Information (geolocations, specific coordinates)
-- Employment Information (job titles, workplace names, employment history)
-- Education Information (school names, degrees, transcripts)
-- Medical Information (health records, diagnoses, genetic or neural data)
-
-If the document is a form, then ONLY consider fields which are filled out with specific values as potential PII. An empty form that asks for PII is not to be marked as containing PII.
-If this page does not itself contain PII, but references documents (such as curriculum vitae, personal statements) that typically contain PII, then do not mark it as PII.
-Only consider actual occurrences of the PII within the document shown.
-"""
-
-    prompt_end = "Answer as a JSON object with the following schema {'primary_language': str, 'document_type': str, 'is_public_document': bool, 'contains_pii_government_id': bool, 'contains_pii_financial_info': bool, 'contains_pii_biometric_data': bool, 'contains_pii_login_info': bool, 'contains_identifier_name': bool, 'contains_identifier_email': bool, 'contains_identifier_phone_number': bool, 'contains_identifier_with_address': bool, 'contains_identifier_with_biographical_info': bool, 'contains_identifier_with_location_info': bool, 'contains_identifier_with_employment_info': bool, 'contains_identifier_with_education_info': bool, 'contains_identifier_with_medical_info': bool}"
+    text = page_text
 
     query = {
-        "model": "google/gemma-3-12b-it",
+        "model": "google/gemma-3-4b-it",
         "messages": [
             {
                 "role": "user",
                 "content": [
                     {
                         "type": "text",
-                        "text": (f"{rich_prompt}\n-----DOCUMENT_START-----\n{page_text}\n-----DOCUMENT_END-----\n{prompt_end}"),
+                        "text": (
+                            f"{text}\n\n-----------\n"
+                            "Given the text above, determine what type of document it is. Answer in JSON. The format of your json object should be {'primary_language': str, 'document_type': str, 'is_resume_cv': bool, 'is_academic_paper': bool, 'is_textbook': bool, 'is_news_article': bool, 'is_test_or_quiz': bool, 'is_homework_assignment': bool, 'is_class_syllabus': bool, 'is_meeting_minutes': bool, 'is_legal_contract': bool, 'is_form': bool, 'is_correspondence_or_letter': bool, 'is_public_order': bool, 'is_court_notice': bool, 'is_completion_certificate': bool, 'contains_pii': bool}"
+                        ),
                     }
                 ],
             }
         ],
-        "max_tokens": 300,
+        "max_tokens": 400,
         "temperature": 0.0,
-        "response_format": {"type": "json_schema", "json_schema": {"name": "RichPIIClassification", "schema": RichPIIClassification.model_json_schema()}},
+        "response_format": {"type": "json_schema", "json_schema": {"name": "PIIClassification", "schema": PIIClassification.model_json_schema()}},
     }
 
     url = f"http://localhost:{SERVER_PORT}/v1/chat/completions"
@@ -180,14 +121,14 @@ Only consider actual occurrences of the PII within the document shown.
     except Exception as e:
         logger.warning(f"Server network error: {e!s}")
         metrics.add_metrics(server_errors=1)
-        return RichPIIClassification(primary_language="en", document_type="unknown", is_public_document=False)
+        return PIIClassification(primary_language="en", document_type="unknown", is_resume_cv=None, contains_pii=None)
 
     metrics.add_metrics(server_requests=1)
 
     if status != 200:
         logger.warning(f"Server HTTP {status}: {body[:250]!r}")
         metrics.add_metrics(server_errors=1)
-        return RichPIIClassification(primary_language="en", document_type="unknown", is_public_document=False)
+        return PIIClassification(primary_language="en", document_type="unknown", is_resume_cv=None, contains_pii=None)
 
     # ---------- Parse base JSON --------------------------------------------
     try:
@@ -195,7 +136,7 @@ Only consider actual occurrences of the PII within the document shown.
     except json.JSONDecodeError:
         logger.warning(f"Server response is not valid JSON: {body[:250]!r}")
         metrics.add_metrics(server_errors=1)
-        return RichPIIClassification(primary_language="en", document_type="unknown", is_public_document=False)
+        return PIIClassification(primary_language="en", document_type="unknown", is_resume_cv=None, contains_pii=None)
 
     # Token accounting if available
     if "usage" in base:
@@ -210,20 +151,20 @@ Only consider actual occurrences of the PII within the document shown.
     except (KeyError, IndexError, AttributeError) as e:
         logger.warning(f"Missing fields in Server response: {e!s}")
         metrics.add_metrics(server_errors=1)
-        return RichPIIClassification(primary_language="en", document_type="unknown", is_public_document=False)
+        return PIIClassification(primary_language="en", document_type="unknown", is_resume_cv=None, contains_pii=None)
 
     if not isinstance(content, str):
         logger.warning("Server `content` is not a string; treating as error.")
         metrics.add_metrics(server_errors=1)
-        return RichPIIClassification(primary_language="en", document_type="unknown", is_public_document=False)
+        return PIIClassification(primary_language="en", document_type="unknown", is_resume_cv=None, contains_pii=None)
 
     try:
-        pii_classification: RichPIIClassification = RichPIIClassification.model_validate_json(content)
+        pii_classification: PIIClassification = PIIClassification.model_validate_json(content)
         return pii_classification
     except ValidationError as e:
         logger.warning(f"Unable to parse pii classification object: {e!s}")
         metrics.add_metrics(server_errors=1)
-        return RichPIIClassification(primary_language="en", document_type="unknown", is_public_document=False)
+        return PIIClassification(primary_language="en", document_type="unknown", is_resume_cv=None, contains_pii=None)
 
 
 # Manual simple implementation of HTTP Post
@@ -303,92 +244,44 @@ async def process_dolma_document(args, dolma_doc, sem):
 
     Always returns: (doc_id, contains_pii: bool, text_length: int)
     """
+    doc_id = dolma_doc.get("id")
     text = dolma_doc.get("text", "") or ""
 
-    # Generate attribute key names using model name
-    model_prefix = args.model.replace("/", "_")
-    language_key_name = f"{model_prefix}_language"
-    contains_pii_key_name = f"{model_prefix}_contains_pii"
+    # Create keys for all fields in PIIClassification
+    prefix = args.model.replace("/", "_") + "_v2tag_"
+    result_attributes = {}
 
-    # Initialize result attributes with all RichPIIClassification attributes
-    result_attributes = {
-        contains_pii_key_name: [],
-        language_key_name: [],
-        f"{model_prefix}_is_public_document": [],
-        f"{model_prefix}_contains_pii_government_id": [],
-        f"{model_prefix}_contains_pii_financial_info": [],
-        f"{model_prefix}_contains_pii_biometric_data": [],
-        f"{model_prefix}_contains_pii_login_info": [],
-        f"{model_prefix}_contains_identifier_name": [],
-        f"{model_prefix}_contains_identifier_email": [],
-        f"{model_prefix}_contains_identifier_phone_number": [],
-        f"{model_prefix}_contains_identifier_with_address": [],
-        f"{model_prefix}_contains_identifier_with_biographical_info": [],
-        f"{model_prefix}_contains_identifier_with_location_info": [],
-        f"{model_prefix}_contains_identifier_with_employment_info": [],
-        f"{model_prefix}_contains_identifier_with_education_info": [],
-        f"{model_prefix}_contains_identifier_with_medical_info": [],
-    }
+    # Initialize attribute lists for all PIIClassification fields
+    for field_name in PIIClassification.model_fields:
+        key_name = f"{prefix}_{field_name}"
+        result_attributes[key_name] = []
 
-    # If pdf_page_numbers is present, split the text and process each page separately
+    # If pdf_page_numbers is present, sample first 5000 characters of the document
     if "attributes" in dolma_doc and "pdf_page_numbers" in dolma_doc["attributes"]:
         page_numbers = dolma_doc["attributes"]["pdf_page_numbers"]
 
-        # Filter pages down to actual real content
-        selected_page_numbers = [tuple(p) for p in page_numbers if p[0] < p[1]]
+        logger.info(f"Document {doc_id} has {len(page_numbers)} pages, processing first 5000 characters")
 
-        # Select just the first page
-        selected_page_numbers = selected_page_numbers[:1]
+        # Take first 5000 characters of the document
+        sample_text = text[:5000]
+        text_length = len(text)
+        span_end = min(5000, text_length)
 
-        # Original select first + 2 more code
-        # first_page_number = selected_page_numbers[0]
+        # Process the sample with the semaphore to limit concurrent requests
+        async with sem:
+            pii_class = await _process_single_page(sample_text)
 
-        # # Sample 3 pages max per document, but always include the first page, it's a good signal for CV classification
-        # random.shuffle(selected_page_numbers)
-        # selected_page_numbers = selected_page_numbers[:3]
+        # Add all classification attributes to results
+        for field_name in PIIClassification.model_fields:
+            key_name = f"{prefix}_{field_name}"
+            attribute_value = getattr(pii_class, field_name)
 
-        # if first_page_number not in selected_page_numbers:
-        #     selected_page_numbers[0] = first_page_number
+            # Create a span from 0 to min(5000, len(text)) with the attribute value
+            result_attributes[key_name].append([0, span_end, attribute_value])
 
-        for start_pos, end_pos, page_num in page_numbers:
-            if (start_pos, end_pos, page_num) in selected_page_numbers:
-                page_text = text[start_pos:end_pos]
-
-                # Process each page with the semaphore to limit concurrent requests
-                async with sem:
-                    pii_class = await _process_single_page(page_text)
-
-                # Add all attributes from RichPIIClassification
-                result_attributes[contains_pii_key_name].append([start_pos, end_pos, pii_class.contains_any_pii()])
-                result_attributes[language_key_name].append([start_pos, end_pos, pii_class.primary_language])
-                result_attributes[f"{model_prefix}_is_public_document"].append([start_pos, end_pos, pii_class.is_public_document])
-                result_attributes[f"{model_prefix}_contains_pii_government_id"].append([start_pos, end_pos, pii_class.contains_pii_government_id])
-                result_attributes[f"{model_prefix}_contains_pii_financial_info"].append([start_pos, end_pos, pii_class.contains_pii_financial_info])
-                result_attributes[f"{model_prefix}_contains_pii_biometric_data"].append([start_pos, end_pos, pii_class.contains_pii_biometric_data])
-                result_attributes[f"{model_prefix}_contains_pii_login_info"].append([start_pos, end_pos, pii_class.contains_pii_login_info])
-                result_attributes[f"{model_prefix}_contains_identifier_name"].append([start_pos, end_pos, pii_class.contains_identifier_name])
-                result_attributes[f"{model_prefix}_contains_identifier_email"].append([start_pos, end_pos, pii_class.contains_identifier_email])
-                result_attributes[f"{model_prefix}_contains_identifier_phone_number"].append([start_pos, end_pos, pii_class.contains_identifier_phone_number])
-                result_attributes[f"{model_prefix}_contains_identifier_with_address"].append([start_pos, end_pos, pii_class.contains_identifier_with_address])
-                result_attributes[f"{model_prefix}_contains_identifier_with_biographical_info"].append(
-                    [start_pos, end_pos, pii_class.contains_identifier_with_biographical_info]
-                )
-                result_attributes[f"{model_prefix}_contains_identifier_with_location_info"].append(
-                    [start_pos, end_pos, pii_class.contains_identifier_with_location_info]
-                )
-                result_attributes[f"{model_prefix}_contains_identifier_with_employment_info"].append(
-                    [start_pos, end_pos, pii_class.contains_identifier_with_employment_info]
-                )
-                result_attributes[f"{model_prefix}_contains_identifier_with_education_info"].append(
-                    [start_pos, end_pos, pii_class.contains_identifier_with_education_info]
-                )
-                result_attributes[f"{model_prefix}_contains_identifier_with_medical_info"].append(
-                    [start_pos, end_pos, pii_class.contains_identifier_with_medical_info]
-                )
-            else:
-                # For pages we don't process, set all attributes to None
-                for attr_key in result_attributes:
-                    result_attributes[attr_key].append([start_pos, end_pos, None])
+            # If the document is longer than 5000 characters, add a null span for the rest
+            if text_length > 5000:
+                result_attributes[key_name].append([span_end, text_length, None])
 
         return result_attributes
     else:
@@ -527,11 +420,6 @@ async def server_task(model_name_or_path, args, semaphore):
         "--uvicorn-log-level",
         "warning",
         "--disable-log-requests",
-        "--max-model-len",
-        "16000",
-        # "--hf_overrides",  "{\"architectures\": [\"Gemma3ForCausalLM\"]}",
-        "--limit-mm-per-prompt",
-        "images=0",
     ]
 
     proc = await asyncio.create_subprocess_exec(
@@ -629,7 +517,7 @@ async def server_host(model_name_or_path, args, semaphore):
 
 
 async def check_server_ready():
-    max_attempts = 600
+    max_attempts = 300
     delay_sec = 1
     url = f"http://localhost:{SERVER_PORT}/v1/models"
 
@@ -767,7 +655,7 @@ def submit_beaker_job(args):
                     preemptible=True,
                 ),
                 image=ImageSource(beaker=beaker_image),
-                command=["python", "scripts/rich_tagging_pipeline.py"] + args_list,
+                command=["python", "scripts/tagging_pipeline_v2.py"] + args_list,
                 env_vars=[EnvVar(name="BEAKER_JOB_NAME", value=task_name), EnvVar(name="OWNER", value=owner)] + env_var_secrets,
                 resources=TaskResources(gpu_count=1),
                 constraints=Constraints(cluster=args.beaker_cluster if isinstance(args.beaker_cluster, list) else [args.beaker_cluster]),
@@ -787,8 +675,8 @@ async def main():
     parser.add_argument("scratch", help="Scratch workspace (local dir or s3://)")
     parser.add_argument("--workers", type=int, default=4, help="Number of concurrent workers")
     parser.add_argument("--parallel_requests", type=int, default=800, help="Max number of parallel requests to send to model")
-    parser.add_argument("--model", default="google/gemma-3-12b-it", help="Model path or name, hugging face or local path format")
-    parser.add_argument("--attribute_name", default="model_rich_pii_tagging", help="Path to use for attribute naming")
+    parser.add_argument("--model", default="google/gemma-3-4b-it", help="Model path or name, hugging face or local path format")
+    parser.add_argument("--attribute_name", default="model_pii_tagging_v2", help="Path to use for attribute naming")
 
     # Beaker/job running stuff
     parser.add_argument("--beaker", action="store_true", help="Submit this job to beaker instead of running locally")

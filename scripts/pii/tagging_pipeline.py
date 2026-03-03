@@ -7,7 +7,6 @@ this script issues a model prompt completion
 collects the yes/no answers, and writes corresponding Dolma attributes JSONL files under
 scratch/attributes/, mirroring the input structure.
 """
-
 import argparse
 import asyncio
 import atexit
@@ -15,6 +14,7 @@ import gzip
 import json
 import logging
 import os
+import random
 import re
 import sys
 import time
@@ -36,7 +36,7 @@ from olmocr.s3_utils import (
     parse_s3_path,
 )
 from olmocr.version import VERSION
-from olmocr.work_queue import LocalBackend, S3Backend, WorkQueue
+from olmocr.work_queue import LocalWorkQueue, S3WorkQueue, WorkQueue
 
 # Initialize logger
 logger = logging.getLogger(__name__)
@@ -70,23 +70,8 @@ metrics = MetricsKeeper(window=60 * 5)
 class PIIClassification(BaseModel):
     primary_language: str = Field(..., description="Primary language as a two-letter code")
     document_type: str = Field(..., description="Basic summary of document type classification")
-    is_resume_cv: Optional[bool] = Field(None, description="True if the document is a page from a resume or cv")
-
-    is_academic_paper: Optional[bool] = None
-    is_textbook: Optional[bool] = None
-    is_news_article: Optional[bool] = None
-    is_test_or_quiz: Optional[bool] = None
-    is_homework_assignment: Optional[bool] = None
-    is_class_syllabus: Optional[bool] = None
-    is_meeting_minutes: Optional[bool] = None
-    is_legal_contract: Optional[bool] = None
-    is_form: Optional[bool] = None
-    is_correspondence_or_letter: Optional[bool] = None
-    is_public_order: Optional[bool] = None
-    is_court_notice: Optional[bool] = None
-    is_completion_certificate: Optional[bool] = None
-
-    contains_pii: Optional[bool] = Field(None, description="True if document contains PII")
+    is_resume_cv: Optional[bool] = Field(..., description="True if the document is a page from a resume or cv")
+    contains_pii: Optional[bool] = Field(..., description="True if document contains PII")
 
 
 async def _process_single_page(page_text: str) -> PIIClassification:
@@ -103,13 +88,13 @@ async def _process_single_page(page_text: str) -> PIIClassification:
                         "type": "text",
                         "text": (
                             f"{text}\n\n-----------\n"
-                            "Given the text above, determine what type of document it is. Answer in JSON. The format of your json object should be {'primary_language': str, 'document_type': str, 'is_resume_cv': bool, 'is_academic_paper': bool, 'is_textbook': bool, 'is_news_article': bool, 'is_test_or_quiz': bool, 'is_homework_assignment': bool, 'is_class_syllabus': bool, 'is_meeting_minutes': bool, 'is_legal_contract': bool, 'is_form': bool, 'is_correspondence_or_letter': bool, 'is_public_order': bool, 'is_court_notice': bool, 'is_completion_certificate': bool, 'contains_pii': bool}"
+                            "Given the text above, determine what type of document it is, and if it's a resume/CV. answer in JSON. The format of your json object should be {'primary_language': str, 'document_type': str, 'is_resume_cv': bool, 'contains_pii': bool}"
                         ),
                     }
                 ],
             }
         ],
-        "max_tokens": 400,
+        "max_tokens": 100,
         "temperature": 0.0,
         "response_format": {"type": "json_schema", "json_schema": {"name": "PIIClassification", "schema": PIIClassification.model_json_schema()}},
     }
@@ -245,39 +230,48 @@ async def process_dolma_document(args, dolma_doc, sem):
 
     Always returns: (doc_id, contains_pii: bool, text_length: int)
     """
+    doc_id = dolma_doc.get("id")
     text = dolma_doc.get("text", "") or ""
 
-    # Create keys for all fields in PIIClassification
-    prefix = args.model.replace("/", "_") + "_v2tag_"
-    result_attributes = {}
+    language_key_name = f"{args.model.replace('/', '_')}_language"
+    resume_cv_key_name = f"{args.model.replace('/', '_')}_is_resume_cv"
 
-    # Initialize attribute lists for all PIIClassification fields
-    for field_name in PIIClassification.model_fields:
-        key_name = f"{prefix}_{field_name}"
-        result_attributes[key_name] = []
+    result_attributes = {resume_cv_key_name: [], language_key_name: []}
 
-    # Take first 5000 characters of the document for classification
-    sample_text = text[:5000]
-    text_length = len(text)
-    span_end = min(5000, text_length)
+    # If pdf_page_numbers is present, split the text and process each page separately
+    if "attributes" in dolma_doc and "pdf_page_numbers" in dolma_doc["attributes"]:
+        page_numbers = dolma_doc["attributes"]["pdf_page_numbers"]
 
-    # Process the sample with the semaphore to limit concurrent requests
-    async with sem:
-        pii_class = await _process_single_page(sample_text)
+        logger.info(f"Document {doc_id} has {len(page_numbers)} pages, processing each individually")
 
-    # Add all classification attributes to results
-    for field_name in PIIClassification.model_fields:
-        key_name = f"{prefix}_{field_name}"
-        attribute_value = getattr(pii_class, field_name)
+        # Filter pages down to actual real content
+        selected_page_numbers = [tuple(p) for p in page_numbers if p[0] < p[1]]
+        first_page_number = selected_page_numbers[0]
 
-        # Create a span from 0 to min(5000, len(text)) with the attribute value
-        result_attributes[key_name].append([0, span_end, attribute_value])
+        # Sample 3 pages max per document, but always include the first page, it's a good signal for CV classification
+        random.shuffle(selected_page_numbers)
+        selected_page_numbers = selected_page_numbers[:3]
 
-        # If the document is longer than 5000 characters, add a null span for the rest
-        if text_length > 5000:
-            result_attributes[key_name].append([span_end, text_length, None])
+        if first_page_number not in selected_page_numbers:
+            selected_page_numbers[0] = first_page_number
 
-    return result_attributes
+        for start_pos, end_pos, page_num in page_numbers:
+            if (start_pos, end_pos, page_num) in selected_page_numbers:
+                page_text = text[start_pos:end_pos]
+
+                # Process each page with the semaphore to limit concurrent requests
+                async with sem:
+                    pii_class = await _process_single_page(page_text)
+
+                result_attributes[resume_cv_key_name].append([start_pos, end_pos, pii_class.is_resume_cv])
+                result_attributes[language_key_name].append([start_pos, end_pos, pii_class.primary_language])
+            else:
+                result_attributes[resume_cv_key_name].append([start_pos, end_pos, None])
+                result_attributes[language_key_name].append([start_pos, end_pos, None])
+
+        return result_attributes
+    else:
+        raise NotImplementedError("Missing code here, expecting this to be dolma docs made by olmocr....")
 
 
 async def process_file(args, worker_id: int, file_uri: str):
@@ -296,11 +290,11 @@ async def process_file(args, worker_id: int, file_uri: str):
         file_bytes = gzip.decompress(raw)
     elif file_uri.endswith(".ztd") or file_uri.endswith(".zst") or file_uri.endswith(".zstd"):
         dctx = zstd.ZstdDecompressor()
-        file_bytes = dctx.stream_reader(raw).read()
+        file_bytes = dctx.decompress(raw, max_output_size=1_000_000_000)
     else:
         file_bytes = raw
 
-    lines = [ln for ln in file_bytes.decode("utf-8").split("\n") if ln]
+    lines = file_bytes.decode("utf-8").splitlines()
     page_tasks = {}
 
     # Send all records in parallel, max N queued at a time
@@ -412,8 +406,6 @@ async def server_task(model_name_or_path, args, semaphore):
         "--uvicorn-log-level",
         "warning",
         "--disable-log-requests",
-        "--limit-mm-per-prompt",
-        '{"image":0, "video": 0}',  # Disabling video encoder saves RAM that you can put towards the KV cache, thanks @charitarthchugh
     ]
 
     proc = await asyncio.create_subprocess_exec(
@@ -466,7 +458,7 @@ async def server_task(model_name_or_path, args, semaphore):
             except Exception as ex:
                 logger.warning(f"Got {ex} when reading log line from inference server, skipping")
 
-    async def timeout_handler():
+    async def timeout_task():
         nonlocal last_running_req, last_queue_req, last_semaphore_release
         try:
             while True:
@@ -481,7 +473,7 @@ async def server_task(model_name_or_path, args, semaphore):
     # Start tasks to read stdout, stderr, and handle timeout logic
     stdout_task = asyncio.create_task(read_stream(proc.stdout))
     stderr_task = asyncio.create_task(read_stream(proc.stderr))
-    timeout_task = asyncio.create_task(timeout_handler())
+    timeout_task = asyncio.create_task(timeout_task())
 
     try:
         await proc.wait()
@@ -559,25 +551,24 @@ async def metrics_reporter(work_queue):
 def submit_beaker_job(args):
     from beaker import (  # type: ignore
         Beaker,
-        BeakerConstraints,
-        BeakerEnvVar,
-        BeakerExperimentSpec,
-        BeakerImageSource,
-        BeakerJobPriority,
-        BeakerResultSpec,
-        BeakerRetrySpec,
-        BeakerTaskContext,
-        BeakerTaskResources,
-        BeakerTaskSpec,
+        Constraints,
+        EnvVar,
+        ExperimentSpec,
+        ImageSource,
+        Priority,
+        ResultSpec,
+        SecretNotFound,
+        TaskContext,
+        TaskResources,
+        TaskSpec,
     )
-    from beaker.exceptions import BeakerSecretNotFound
 
-    Beaker.TIMEOUT = 60
     b = Beaker.from_env(default_workspace=args.beaker_workspace)
-    owner = b.user_name
-    beaker_image = f"jakep/olmocr-inference-{VERSION}"
+    account = b.account.whoami()
+    owner = account.name
+    beaker_image = f"jakep/olmocr-tagging-{VERSION}"
 
-    task_name = f"olmocr-tagging-{os.path.basename(args.scratch.rstrip('/'))}"
+    task_name = f"olmocr-{os.path.basename(args.dataset.rstrip('/'))}"
 
     # Take out --beaker flag so the workers will just run things
     args_list = [arg for arg in sys.argv[1:] if arg != "--beaker"]
@@ -586,10 +577,10 @@ def submit_beaker_job(args):
     args_list = [arg for i, arg in enumerate(args_list) if not (arg.startswith("--pdfs") or (i > 0 and args_list[i - 1] == "--pdfs"))]
 
     try:
-        b.secret.get(f"{owner}-WEKA_ACCESS_KEY_ID")
-        b.secret.get(f"{owner}-WEKA_SECRET_ACCESS_KEY")
-        b.secret.get(f"{owner}-AWS_CREDENTIALS_FILE")
-    except BeakerSecretNotFound:
+        b.secret.get(f"{owner}-WEKA_ACCESS_KEY_ID", args.beaker_workspace)
+        b.secret.get(f"{owner}-WEKA_SECRET_ACCESS_KEY", args.beaker_workspace)
+        b.secret.get(f"{owner}-AWS_CREDENTIALS_FILE", args.beaker_workspace)
+    except SecretNotFound:
         print(
             f"Expected beaker secrets for accessing Weka and S3 are not found. Are you okay to write those to your beaker workspace {args.beaker_workspace}? [y/n]"
         )
@@ -598,29 +589,30 @@ def submit_beaker_job(args):
             print("Exiting...")
             sys.exit(1)
 
-        b.secret.write(f"{owner}-WEKA_ACCESS_KEY_ID", os.environ.get("WEKA_ACCESS_KEY_ID", ""))
-        b.secret.write(f"{owner}-WEKA_SECRET_ACCESS_KEY", os.environ.get("WEKA_SECRET_ACCESS_KEY", ""))
+        b.secret.write(f"{owner}-WEKA_ACCESS_KEY_ID", os.environ.get("WEKA_ACCESS_KEY_ID", ""), args.beaker_workspace)
+        b.secret.write(f"{owner}-WEKA_SECRET_ACCESS_KEY", os.environ.get("WEKA_SECRET_ACCESS_KEY", ""), args.beaker_workspace)
         b.secret.write(
             f"{owner}-AWS_CREDENTIALS_FILE",
             open(os.path.join(os.path.expanduser("~"), ".aws", "credentials")).read(),
+            args.beaker_workspace,
         )
 
     env_var_secrets = [
-        BeakerEnvVar(name="WEKA_ACCESS_KEY_ID", secret=f"{owner}-WEKA_ACCESS_KEY_ID"),
-        BeakerEnvVar(name="WEKA_SECRET_ACCESS_KEY", secret=f"{owner}-WEKA_SECRET_ACCESS_KEY"),
-        BeakerEnvVar(name="AWS_CREDENTIALS_FILE", secret=f"{owner}-AWS_CREDENTIALS_FILE"),
+        EnvVar(name="WEKA_ACCESS_KEY_ID", secret=f"{owner}-WEKA_ACCESS_KEY_ID"),
+        EnvVar(name="WEKA_SECRET_ACCESS_KEY", secret=f"{owner}-WEKA_SECRET_ACCESS_KEY"),
+        EnvVar(name="AWS_CREDENTIALS_FILE", secret=f"{owner}-AWS_CREDENTIALS_FILE"),
     ]
 
     try:
-        b.secret.get("OLMOCR_PREVIEW_HF_TOKEN")
-        env_var_secrets.append(BeakerEnvVar(name="HF_TOKEN", secret="OLMOCR_PREVIEW_HF_TOKEN"))
-    except BeakerSecretNotFound:
+        b.secret.get("OLMOCR_PREVIEW_HF_TOKEN", args.beaker_workspace)
+        env_var_secrets.append(EnvVar(name="HF_TOKEN", secret="OLMOCR_PREVIEW_HF_TOKEN"))
+    except SecretNotFound:
         pass
 
     try:
-        b.secret.get("OE_DATA_GCS_SA_KEY")
-        env_var_secrets.append(BeakerEnvVar(name="GOOGLE_APPLICATION_CREDENTIALS_FILE", secret="OE_DATA_GCS_SA_KEY"))
-    except BeakerSecretNotFound:
+        b.secret.get("OE_DATA_GCS_SA_KEY", args.beaker_workspace)
+        env_var_secrets.append(EnvVar(name="GOOGLE_APPLICATION_CREDENTIALS_FILE", secret="OE_DATA_GCS_SA_KEY"))
+    except SecretNotFound:
         print("Input the olmo-gcs SA key if you would like to load weights from gcs (end with a double newline):")
         lines = []
         prev_empty = False
@@ -631,41 +623,36 @@ def submit_beaker_job(args):
             lines.append(line)
         gcs_sa_key = "\n".join(lines[:-1]).strip()  # Remove the last empty line
         if gcs_sa_key:
-            b.secret.write("OE_DATA_GCS_SA_KEY", gcs_sa_key)
-            env_var_secrets.append(BeakerEnvVar(name="GOOGLE_APPLICATION_CREDENTIALS_FILE", secret="OE_DATA_GCS_SA_KEY"))
+            b.secret.write("OE_DATA_GCS_SA_KEY", gcs_sa_key, args.beaker_workspace)
+            env_var_secrets.append(EnvVar(name="GOOGLE_APPLICATION_CREDENTIALS_FILE", secret="OE_DATA_GCS_SA_KEY"))
 
     # Create the experiment spec
-    experiment_spec = BeakerExperimentSpec(
+    experiment_spec = ExperimentSpec(
         budget="ai2/oe-base",
         description=task_name,
         tasks=[
-            BeakerTaskSpec(
+            TaskSpec(
                 name=task_name,
                 propagate_failure=False,
                 propagate_preemption=False,
                 replicas=args.beaker_gpus,
-                context=BeakerTaskContext(
-                    priority=BeakerJobPriority[args.beaker_priority],
+                context=TaskContext(
+                    priority=Priority(args.beaker_priority),
                     preemptible=True,
                 ),
-                image=BeakerImageSource(beaker=beaker_image),
-                command=["python", "scripts/pii/tagging_pipeline.py"] + args_list,
-                env_vars=[
-                    BeakerEnvVar(name="BEAKER_JOB_NAME", value=task_name),
-                    BeakerEnvVar(name="OWNER", value=owner),
-                ]
-                + env_var_secrets,
-                resources=BeakerTaskResources(gpu_count=1, memory="125GB"),
-                constraints=BeakerConstraints(cluster=args.beaker_cluster if isinstance(args.beaker_cluster, list) else [args.beaker_cluster]),
-                result=BeakerResultSpec(path="/noop-results"),
+                image=ImageSource(beaker=beaker_image),
+                command=["python", "scripts/tagging_pipeline.py"] + args_list,
+                env_vars=[EnvVar(name="BEAKER_JOB_NAME", value=task_name), EnvVar(name="OWNER", value=owner)] + env_var_secrets,
+                resources=TaskResources(gpu_count=1),
+                constraints=Constraints(cluster=args.beaker_cluster if isinstance(args.beaker_cluster, list) else [args.beaker_cluster]),
+                result=ResultSpec(path="/noop-results"),
             )
         ],
-        retry=BeakerRetrySpec(allowed_task_retries=10),
     )
 
-    workload = b.experiment.create(spec=experiment_spec)
+    experiment_data = b.experiment.create(spec=experiment_spec, workspace=args.beaker_workspace)
 
-    print(f"Experiment URL: https://beaker.org/ex/{workload.experiment.id}")
+    print(f"Experiment URL: https://beaker.org/ex/{experiment_data.id}")
 
 
 async def main():
@@ -683,7 +670,7 @@ async def main():
     parser.add_argument(
         "--beaker_cluster",
         help="Beaker clusters you want to run on",
-        default=["ai2/jupiter", "ai2/ceres", "ai2/neptune", "ai2/saturn"],
+        default=["ai2/jupiter-cirrascale-2", "ai2/ceres-cirrascale", "ai2/neptune-cirrascale", "ai2/saturn-cirrascale", "ai2/augusta-google-1"],
     )
     parser.add_argument("--beaker_gpus", type=int, default=1, help="Number of gpu replicas to run")
     parser.add_argument("--beaker_priority", type=str, default="normal", help="Beaker priority level for the job")
@@ -697,31 +684,34 @@ async def main():
     dataset_s3 = boto3.client("s3")
 
     # setup the job to work in beaker environment, load secrets, adjust logging, etc.
-    if "BEAKER_JOB_NAME" in os.environ:
-        cred_path = os.path.join(os.path.expanduser("~"), ".aws", "credentials")
-        os.makedirs(os.path.dirname(cred_path), exist_ok=True)
-        with open(cred_path, "w") as f:
-            f.write(os.environ.get("AWS_CREDENTIALS_FILE", ""))
-        cred_path = os.path.join(os.path.expanduser("~"), ".gcs", "credentials")
-        os.makedirs(os.path.dirname(cred_path), exist_ok=True)
-        with open(cred_path, "w") as f:
-            f.write(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_FILE", ""))
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = cred_path
+    if "BEAKER_JOB_ID" in os.environ:
+        server_logger.addHandler(console_handler)
+        if "AWS_CREDENTIALS_FILE" in os.environ:
+            cred_path = os.path.join(os.path.expanduser("~"), ".aws", "credentials")
+            os.makedirs(os.path.dirname(cred_path), exist_ok=True)
+            with open(cred_path, "w") as f:
+                f.write(os.environ.get("AWS_CREDENTIALS_FILE"))
+        if "GOOGLE_APPLICATION_CREDENTIALS" in os.environ:
+            cred_path = os.path.join(os.path.expanduser("~"), ".gcs", "credentials")
+            os.makedirs(os.path.dirname(cred_path), exist_ok=True)
+            with open(cred_path, "w") as f:
+                f.write(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_FILE"))
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = cred_path
         workspace_s3 = boto3.client("s3")
         dataset_s3 = boto3.client("s3")
 
         # Wait a little bit so that not all beaker jobs in a task start at the same time and download the model at the same time
         replica_count = int(os.environ.get("BEAKER_REPLICA_COUNT", "1"))
-        interval = 10 if (replica_count - 1) * 10 <= 30 else 30 / max(1, replica_count - 1)
-        sleep_time = int(os.environ.get("BEAKER_REPLICA_RANK", "0")) * interval
+        interval = 10 if (replica_count - 1) * 10 <= 240 else 240 / max(1, replica_count - 1)
+        sleep_time = int(int(os.environ.get("BEAKER_REPLICA_RANK", "0")) * interval)
         logger.info(f"Beaker job sleeping for {sleep_time} seconds to stagger model downloads")
         await asyncio.sleep(sleep_time)
 
     # Initialize work queue
     if args.scratch.startswith("s3://"):
-        work_queue = WorkQueue(S3Backend(workspace_s3, args.scratch))
+        work_queue = S3WorkQueue(workspace_s3, args.scratch)
     else:
-        work_queue = WorkQueue(LocalBackend(args.scratch))
+        work_queue = LocalWorkQueue(args.scratch)
 
     # Discover input files
     files = set()

@@ -7,26 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
-## [v0.4.25](https://github.com/allenai/olmocr/releases/tag/v0.4.25) - 2026-01-25
-
-## [v0.4.24](https://github.com/allenai/olmocr/releases/tag/v0.4.24) - 2026-01-23
-
-## [v0.4.23](https://github.com/allenai/olmocr/releases/tag/v0.4.23) - 2026-01-23
-
-## [v0.4.22](https://github.com/allenai/olmocr/releases/tag/v0.4.22) - 2026-01-23
-
-## [v0.4.21](https://github.com/allenai/olmocr/releases/tag/v0.4.21) - 2026-01-23
-
-## [v0.4.20](https://github.com/allenai/olmocr/releases/tag/v0.4.20) - 2026-01-20
-
-## [v0.4.19](https://github.com/allenai/olmocr/releases/tag/v0.4.19) - 2026-01-20
-
-## [v0.4.18](https://github.com/allenai/olmocr/releases/tag/v0.4.18) - 2026-01-20
-
-## [v0.4.17](https://github.com/allenai/olmocr/releases/tag/v0.4.17) - 2026-01-20
-
-## [v0.4.16](https://github.com/allenai/olmocr/releases/tag/v0.4.16) - 2026-01-12
-
 ## [v0.4.15](https://github.com/allenai/olmocr/releases/tag/v0.4.15) - 2026-01-09
 
 ## [v0.4.14](https://github.com/allenai/olmocr/releases/tag/v0.4.14) - 2026-01-08

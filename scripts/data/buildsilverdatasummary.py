@@ -31,12 +31,14 @@ def cache_athena_csv_to_db(athena_csv_path: str) -> str:
         cursor.execute("PRAGMA synchronous = OFF;")
         cursor.execute("PRAGMA journal_mode = MEMORY;")
 
-        cursor.execute("""
+        cursor.execute(
+            """
             CREATE TABLE pdf_mapping (
                 pdf_hash TEXT PRIMARY KEY,
                 uri TEXT
             )
-            """)
+            """
+        )
 
         with open(athena_csv_path, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)

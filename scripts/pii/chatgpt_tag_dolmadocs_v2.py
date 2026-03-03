@@ -7,7 +7,6 @@ This script uses ChatGPT Vision API to classify PDF documents into various categ
 2. Classifies documents into categories like academic papers, textbooks, news articles, etc.
 3. Creates attribute folders mirroring the document structure with classification results
 """
-
 import argparse
 import gzip
 import json

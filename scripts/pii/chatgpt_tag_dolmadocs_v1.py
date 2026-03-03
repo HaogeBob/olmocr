@@ -7,7 +7,6 @@ This script combines the functionality of autoscan_dolmadocs.py and rich_tagging
 2. Creates attribute folders mirroring the document structure
 3. Simplifies with direct ThreadPoolExecutor usage instead of work queue system
 """
-
 import argparse
 import gzip
 import json

@@ -6,29 +6,30 @@ run_name: qwen25_vl_olmocrv4_finetuning-demo
 
 # Model configuration
 model:
-  name: allenai/olmOCR-2-7B-1025
+  name: /data/share/hub/models/olmOCR-2-7B-1025
+  # name: /data/A800/cwh/detect_ocr_data/olmocr-finetuning-v2.0/olm_ocr
   trust_remote_code: true
   torch_dtype: bfloat16
   use_flash_attention: true
   attn_implementation: flash_attention_2
   
   # LoRA settings (disabled by default)
-  use_lora: true
-  lora_rank: 8
-  lora_alpha: 32
-  lora_dropout: 0.1
-  lora_target_modules:
-    - q_proj
-    - v_proj
-    - k_proj
-    - o_proj
+  use_lora: false
+  # lora_rank: 8
+  # lora_alpha: 32
+  # lora_dropout: 0.1
+  # lora_target_modules:
+  #   - q_proj
+  #   - v_proj
+  #   - k_proj
+  #   - o_proj
 
 # Dataset configuration
 dataset:
 
   train:
-    - name: finetuning_data
-      root_dir: /root/test-berkshire-data/train
+    - name: finetuning_data_7000
+      root_dir: /data/A800/cwh/data_clear_check/images_pdf_md
       pipeline: &basic_pipeline
         - name: FrontMatterParser
           front_matter_class: PageResponse
@@ -46,22 +47,25 @@ dataset:
         - name: Tokenizer
           masking_index: -100
           end_of_message_token: "<|im_end|>"
+    # - name: finetuning_data_1000
+    #   root_dir: /data/A800/cwh/detect_ocr_data/training_data_1000
+    #   pipeline: *basic_pipeline
     
 
   eval:
     - name: eval_finetuning_data
-      root_dir: /root/test-berkshire-data/test
+      root_dir: /data/A800/cwh/detect_ocr_data/testing_data
       pipeline: *basic_pipeline
 
 # Training configuration
 training:
-  output_dir: /root/olmocr-trainer/finetuning
-  num_train_epochs: 1
+  output_dir: /data/A800/cwh/detect_ocr_data/olmocr-finetuning
+  num_train_epochs: 3
   
   # Batch size and accumulation
   per_device_train_batch_size: 1
   per_device_eval_batch_size: 1
-  gradient_accumulation_steps: 32
+  gradient_accumulation_steps: 4
 
   gradient_checkpointing: False
 
@@ -69,7 +73,7 @@ training:
   
   # Learning rate
   learning_rate: 2e-5
-  lr_scheduler_type: linear
+  lr_scheduler_type: cosine
   warmup_ratio: 0.1
   
   # Optimization
@@ -78,7 +82,7 @@ training:
   max_grad_norm: 1.0
 
   # Torch compile settings
-  torch_compile: true
+  torch_compile: false
   torch_compile_backend: inductor
   torch_compile_mode: default
   torch_compile_fullgraph: false
@@ -89,13 +93,16 @@ training:
   
   # Evaluation and checkpointing
   evaluation_strategy: steps
-  eval_steps: 500
+  eval_steps: 300
   save_strategy: steps
-  save_steps: 500
-  save_total_limit: 5
+  save_steps: 300
+  save_total_limit: 20
   load_best_model_at_end: false # Needs to be false because it has a problem restoring checkpoints for some reason
-  metric_for_best_model: eval_eval_finetuning_data_loss
-  greater_is_better: false
+  # metric_for_best_model: eval_eval_finetuning_data_loss
+  # greater_is_better: false
+  # metric_for_best_model: eval_eval_finetuning_data_match_rate  char_acc
+  metric_for_best_model: eval_eval_finetuning_data_char_acc
+  greater_is_better: true
   
   report_to: 
-    - wandb
+    - tensorboard

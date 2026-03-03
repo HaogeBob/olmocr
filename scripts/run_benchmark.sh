@@ -13,14 +13,6 @@
 #   ./scripts/run_benchmark.sh --repeats 3
 #  With noperf flag: skip the performance test job
 #   ./scripts/run_benchmark.sh --noperf
-#  With benchrepo parameter: use a different benchmark dataset repository (default: allenai/olmOCR-bench)
-#   ./scripts/run_benchmark.sh --benchrepo allenai/olmOCR-bench-internal
-#  With benchbranch parameter: use a specific branch/revision of the benchmark dataset
-#   ./scripts/run_benchmark.sh --benchbranch olmOCR-bench-1125
-#  With benchpath parameter: use benchmark dataset from a local path or S3 path (mutually exclusive with benchrepo/benchbranch)
-#   ./scripts/run_benchmark.sh --benchpath s3://ai2-oe-data/jakep/olmocr/olmOCR-bench-1125/
-#  With max-tokens parameter: set max tokens for model output per page (default: 8000)
-#   ./scripts/run_benchmark.sh --max-tokens 16000
 
 set -e
 
@@ -28,12 +20,9 @@ set -e
 MODEL=""
 CLUSTER=""
 BENCH_BRANCH=""
-BENCH_REPO=""
-BENCH_PATH=""
 BEAKER_IMAGE=""
 REPEATS="1"
 NOPERF=""
-MAX_TOKENS=""
 while [[ $# -gt 0 ]]; do
     case $1 in
         --model)
@@ -48,14 +37,6 @@ while [[ $# -gt 0 ]]; do
             BENCH_BRANCH="$2"
             shift 2
             ;;
-        --benchrepo)
-            BENCH_REPO="$2"
-            shift 2
-            ;;
-        --benchpath)
-            BENCH_PATH="$2"
-            shift 2
-            ;;
         --beaker-image)
             BEAKER_IMAGE="$2"
             shift 2
@@ -68,24 +49,13 @@ while [[ $# -gt 0 ]]; do
             NOPERF="1"
             shift
             ;;
-        --max-tokens)
-            MAX_TOKENS="$2"
-            shift 2
-            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--model MODEL_NAME] [--cluster CLUSTER_NAME] [--benchbranch BRANCH_NAME] [--benchrepo REPO_URL] [--benchpath PATH] [--beaker-image IMAGE_NAME] [--repeats NUMBER] [--noperf] [--max-tokens NUMBER]"
+            echo "Usage: $0 [--model MODEL_NAME] [--cluster CLUSTER_NAME] [--benchbranch BRANCH_NAME] [--beaker-image IMAGE_NAME] [--repeats NUMBER] [--noperf]"
             exit 1
             ;;
     esac
 done
-
-# Check for mutual exclusivity between benchpath and benchrepo/benchbranch
-if [ -n "$BENCH_PATH" ] && ([ -n "$BENCH_REPO" ] || [ -n "$BENCH_BRANCH" ]); then
-    echo "Error: --benchpath is mutually exclusive with --benchrepo and --benchbranch"
-    echo "Use either --benchpath OR --benchrepo/--benchbranch, not both."
-    exit 1
-fi
 
 # Check for uncommitted changes
 if [ -n "$BEAKER_IMAGE" ]; then
@@ -151,7 +121,7 @@ cat << 'EOF' > /tmp/run_benchmark_experiment.py
 import sys
 from beaker import Beaker, ExperimentSpec, TaskSpec, TaskContext, ResultSpec, TaskResources, ImageSource, Priority, Constraints, EnvVar
 
-# Get image tag, beaker user, git branch, git hash, optional model, cluster, bench branch, bench repo, and repeats from command line
+# Get image tag, beaker user, git branch, git hash, optional model, cluster, bench branch, and repeats from command line
 image_tag = sys.argv[1]
 beaker_user = sys.argv[2]
 git_branch = sys.argv[3]
@@ -159,11 +129,8 @@ git_hash = sys.argv[4]
 model = None
 cluster = None
 bench_branch = None
-bench_repo = "allenai/olmOCR-bench"  # Default repository
-bench_path = None
 repeats = 1
 noperf = False
-max_tokens = None
 
 # Parse remaining arguments
 arg_idx = 5
@@ -174,21 +141,12 @@ while arg_idx < len(sys.argv):
     elif sys.argv[arg_idx] == "--benchbranch":
         bench_branch = sys.argv[arg_idx + 1]
         arg_idx += 2
-    elif sys.argv[arg_idx] == "--benchrepo":
-        bench_repo = sys.argv[arg_idx + 1]
-        arg_idx += 2
-    elif sys.argv[arg_idx] == "--benchpath":
-        bench_path = sys.argv[arg_idx + 1]
-        arg_idx += 2
     elif sys.argv[arg_idx] == "--repeats":
         repeats = int(sys.argv[arg_idx + 1])
         arg_idx += 2
     elif sys.argv[arg_idx] == "--noperf":
         noperf = True
         arg_idx += 1
-    elif sys.argv[arg_idx] == "--max-tokens":
-        max_tokens = int(sys.argv[arg_idx + 1])
-        arg_idx += 2
     else:
         model = sys.argv[arg_idx]
         arg_idx += 1
@@ -209,17 +167,6 @@ except:
     has_aws_creds = False
     print(f"AWS credentials secret not found: {aws_creds_secret}")
 
-# Check if HF_TOKEN secret exists
-hf_token_secret = f"{beaker_user}-HF_TOKEN"
-try:
-    # Try to get the secret to see if it exists
-    b.secret.get(hf_token_secret, workspace="ai2/olmocr")
-    has_hf_token = True
-    print(f"Found HuggingFace token secret: {hf_token_secret}")
-except:
-    has_hf_token = False
-    print(f"HuggingFace token secret not found: {hf_token_secret}")
-
 # First experiment: Original benchmark job
 commands = []
 if has_aws_creds:
@@ -228,28 +175,15 @@ if has_aws_creds:
         'echo "$AWS_CREDENTIALS_FILE" > ~/.aws/credentials'
     ])
 
-if has_hf_token:
-    commands.append('export HF_TOKEN="$HF_TOKEN"')
+# Build git clone command with optional branch
+git_clone_cmd = "git clone https://huggingface.co/datasets/allenai/olmOCR-bench"
+if bench_branch:
+    git_clone_cmd += f" -b {bench_branch}"
 
-# Install s5cmd (needed for S3 operations)
-commands.append("pip install s5cmd")
-
-# Handle benchmark data download based on source type
-if bench_path:
-    # If bench_path is provided, use it (can be S3 or local path)
-    if bench_path.startswith("s3://"):
-        # S3 path - use s5cmd to download
-        commands.append(f"s5cmd cp {bench_path.rstrip('/')}/* ./olmOCR-bench/")
-    else:
-        # Local path - copy directly
-        commands.append(f"cp -r {bench_path} ./olmOCR-bench")
-else:
-    # Use HuggingFace download (default behavior)
-    hf_download_cmd = f"hf download --repo-type dataset {bench_repo} --max-workers 2"
-    if bench_branch:
-        hf_download_cmd += f" --revision {bench_branch}"
-    hf_download_cmd += " --local-dir ./olmOCR-bench"
-    commands.append(hf_download_cmd)
+commands.extend([
+    git_clone_cmd,
+    "cd olmOCR-bench && git lfs pull && cd ..",
+])
 
 # Run pipeline multiple times based on repeats
 for i in range(1, repeats + 1):
@@ -257,8 +191,6 @@ for i in range(1, repeats + 1):
     pipeline_cmd = f"python -m olmocr.pipeline {workspace_dir} --markdown --pdfs ./olmOCR-bench/bench_data/pdfs/**/*.pdf"
     if model:
         pipeline_cmd += f" --model {model}"
-    if max_tokens:
-        pipeline_cmd += f" --max_tokens {max_tokens}"
     commands.append(pipeline_cmd)
 
 # Process all workspaces with workspace_to_bench.py
@@ -266,6 +198,11 @@ for i in range(1, repeats + 1):
     workspace_dir = f"localworkspace{i}/"
     workspace_to_bench_cmd = f"python olmocr/bench/scripts/workspace_to_bench.py {workspace_dir} olmOCR-bench/bench_data/olmocr --bench-path ./olmOCR-bench/ --repeat-index {i}"
     commands.append(workspace_to_bench_cmd)
+
+# Copy all workspaces to S3 and run benchmark
+commands.extend([
+    "pip install s5cmd",
+])
 
 # Copy each workspace to S3
 for i in range(1, repeats + 1):
@@ -297,14 +234,11 @@ task_spec_args = {
     "result": ResultSpec(path="/noop-results"),
 }
 
-# Add env vars if AWS credentials or HF token exist
-env_vars = []
+# Add env vars if AWS credentials exist
 if has_aws_creds:
-    env_vars.append(EnvVar(name="AWS_CREDENTIALS_FILE", secret=aws_creds_secret))
-if has_hf_token:
-    env_vars.append(EnvVar(name="HF_TOKEN", secret=hf_token_secret))
-if env_vars:
-    task_spec_args["env_vars"] = env_vars
+    task_spec_args["env_vars"] = [
+        EnvVar(name="AWS_CREDENTIALS_FILE", secret=aws_creds_secret)
+    ]
 
 # Create first experiment spec
 experiment_spec = ExperimentSpec(
@@ -325,8 +259,6 @@ if not noperf:
     perf_pipeline_cmd = "python -m olmocr.pipeline ./localworkspace1 --markdown --pdfs s3://ai2-oe-data/jakep/olmocr/olmOCR-mix-0225/benchmark_set/*.pdf"
     if model:
         perf_pipeline_cmd += f" --model {model}"
-    if max_tokens:
-        perf_pipeline_cmd += f" --max_tokens {max_tokens}"
 
     perf_commands = []
     if has_aws_creds:
@@ -334,8 +266,6 @@ if not noperf:
             "mkdir -p ~/.aws",
             'echo "$AWS_CREDENTIALS_FILE" > ~/.aws/credentials'
         ])
-    if has_hf_token:
-        perf_commands.append('export HF_TOKEN="$HF_TOKEN"')
     perf_commands.append(perf_pipeline_cmd)
 
     # Build performance task spec
@@ -356,14 +286,11 @@ if not noperf:
         "result": ResultSpec(path="/noop-results"),
     }
 
-    # Add env vars if AWS credentials or HF token exist
-    env_vars = []
+    # Add env vars if AWS credentials exist
     if has_aws_creds:
-        env_vars.append(EnvVar(name="AWS_CREDENTIALS_FILE", secret=aws_creds_secret))
-    if has_hf_token:
-        env_vars.append(EnvVar(name="HF_TOKEN", secret=hf_token_secret))
-    if env_vars:
-        perf_task_spec_args["env_vars"] = env_vars
+        perf_task_spec_args["env_vars"] = [
+            EnvVar(name="AWS_CREDENTIALS_FILE", secret=aws_creds_secret)
+        ]
 
     # Create performance experiment spec
     perf_experiment_spec = ExperimentSpec(
@@ -401,16 +328,6 @@ if [ -n "$BENCH_BRANCH" ]; then
     CMD="$CMD --benchbranch $BENCH_BRANCH"
 fi
 
-if [ -n "$BENCH_REPO" ]; then
-    echo "Using bench repo: $BENCH_REPO"
-    CMD="$CMD --benchrepo $BENCH_REPO"
-fi
-
-if [ -n "$BENCH_PATH" ]; then
-    echo "Using bench path: $BENCH_PATH"
-    CMD="$CMD --benchpath $BENCH_PATH"
-fi
-
 if [ "$REPEATS" != "1" ]; then
     echo "Using repeats: $REPEATS"
     CMD="$CMD --repeats $REPEATS"
@@ -419,11 +336,6 @@ fi
 if [ -n "$NOPERF" ]; then
     echo "Skipping performance tests"
     CMD="$CMD --noperf"
-fi
-
-if [ -n "$MAX_TOKENS" ]; then
-    echo "Using max tokens: $MAX_TOKENS"
-    CMD="$CMD --max-tokens $MAX_TOKENS"
 fi
 
 eval $CMD

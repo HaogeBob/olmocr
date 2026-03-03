@@ -78,12 +78,15 @@ pdf_s3 = boto3.client("s3")
 metrics = MetricsKeeper(window=60 * 5)
 tracker = WorkerTracker()
 
+<<<<<<< HEAD
 # Global variable for vLLM queue status (updated by vllm_server_task)
 vllm_queued_requests = None
 
 # Temperature values for retry attempts - higher temperature helps overcome repetition issues
 TEMPERATURE_BY_ATTEMPT = [0.1, 0.1, 0.2, 0.3, 0.5, 0.8, 0.9, 1.0]
 
+=======
+>>>>>>> 69f4293 (add metrics, add is_text_clear)
 pdf_render_max_workers_limit = asyncio.BoundedSemaphore(int(float(os.environ.get("BEAKER_ASSIGNED_CPU_COUNT", max(1, multiprocessing.cpu_count() - 2)))))
 max_concurrent_requests_limit = asyncio.BoundedSemaphore(1)  # Actual value set by args in main()
 
@@ -91,6 +94,53 @@ max_concurrent_requests_limit = asyncio.BoundedSemaphore(1)  # Actual value set 
 get_pdf_filter = cache(lambda: PdfFilter(languages_to_keep={Language.ENGLISH, None}, apply_download_spam_check=True, apply_form_check=True))
 
 
+<<<<<<< HEAD
+=======
+def get_markdown_path(workspace: str, source_file: str) -> str:
+    """
+    Calculate the markdown output path for a given source file.
+
+    Args:
+        workspace: The workspace directory path
+        source_file: The original source file path (can be S3, local, or tarball::internal_path)
+
+    Returns:
+        The full path where the markdown file should be written
+    """
+    # Handle tarball paths (format: tarball_path::internal_path)
+    if "::" in source_file:
+        tarball_path, internal_path = source_file.split("::", 1)
+        # Use tarball basename + internal path structure
+        tarball_basename = os.path.splitext(os.path.basename(tarball_path))[0]
+        if tarball_basename.endswith(".tar"):
+            tarball_basename = tarball_basename[:-4]
+        relative_path = os.path.join(tarball_basename, internal_path)
+    elif source_file.startswith("s3://"):
+        # Extract the path after the bucket name for S3 sources
+        parsed = urlparse(source_file)
+        relative_path = parsed.path.lstrip("/")
+    else:
+        # For local files, strip leading slash to make it relative
+        relative_path = source_file.lstrip("/")
+
+    # Sanitize path: remove any .. components to prevent path traversal
+    parts = relative_path.split("/")
+    safe_parts = [p for p in parts if p and p != ".."]
+    relative_path = "/".join(safe_parts)
+
+    # Change the extension to .md
+    md_filename = os.path.splitext(os.path.basename(relative_path))[0] + ".md"
+    # Get the directory path without the filename
+    dir_path = os.path.dirname(relative_path)
+
+    # Create the output markdown path
+    markdown_dir = os.path.join(workspace, "markdown", dir_path)
+    markdown_path = os.path.join(markdown_dir, md_filename)
+
+    return markdown_path
+
+
+>>>>>>> 69f4293 (add metrics, add is_text_clear)
 @dataclass(frozen=True)
 class PageResult:
     s3_path: str
@@ -100,7 +150,10 @@ class PageResult:
     input_tokens: int
     output_tokens: int
     is_fallback: bool
+<<<<<<< HEAD
     is_valid: bool
+=======
+>>>>>>> 69f4293 (add metrics, add is_text_clear)
 
 
 async def build_page_query(local_pdf_path: str, page: int, target_longest_image_dim: int, image_rotation: int = 0, model_name: str = "olmocr") -> dict:
@@ -142,6 +195,7 @@ async def build_page_query(local_pdf_path: str, page: int, target_longest_image_
             }
         ],
         "max_tokens": MAX_TOKENS,
+<<<<<<< HEAD
         "temperature": 0.0,  # This will get overridden later
     }
 
@@ -374,6 +428,12 @@ async def process_page(args, worker_id: int, pdf_orig_path: str, pdf_local_path:
     return make_fallback_result(pdf_orig_path, pdf_local_path, page_num)
 
 
+=======
+        "temperature": 0.0,
+    }
+
+
+>>>>>>> 69f4293 (add metrics, add is_text_clear)
 # Manual simple implementation of HTTP Post
 # It feels strange perhaps, but httpx and aiohttp are very complex beasts
 # Ex. the sessionpool in httpcore has 4 different locks in it, and I've noticed
@@ -475,6 +535,143 @@ async def apost(url, json_data, api_key=None):
                 pass
 
 
+<<<<<<< HEAD
+=======
+async def process_page(args, worker_id: int, pdf_orig_path: str, pdf_local_path: str, page_num: int) -> PageResult:
+    COMPLETION_URL = f"{args.server.rstrip('/')}/chat/completions"
+    MAX_RETRIES = args.max_page_retries
+    MODEL_MAX_CONTEXT = 16384
+    TEMPERATURE_BY_ATTEMPT = [0.1, 0.1, 0.2, 0.3, 0.5, 0.8, 0.9, 1.0]
+    exponential_backoffs = 0
+    cumulative_rotation = 0  # Track cumulative rotation instead of local
+    attempt = 0
+    await tracker.track_work(worker_id, f"{pdf_orig_path}-{page_num}", "started")
+
+    while attempt < MAX_RETRIES:
+        lookup_attempt = min(attempt, len(TEMPERATURE_BY_ATTEMPT) - 1)
+
+        query = await build_page_query(
+            pdf_local_path,
+            page_num,
+            args.target_longest_image_dim,
+            image_rotation=cumulative_rotation,
+            model_name=args.model,
+        )
+        # Change temperature as number of attempts increases to overcome repetition issues at expense of quality
+        query["temperature"] = TEMPERATURE_BY_ATTEMPT[lookup_attempt]
+
+        # Enable guided decoding regex if needed
+        if args.guided_decoding:
+            query["guided_regex"] = (
+                r"---\nprimary_language: (?:[a-z]{2}|null)\nis_rotation_valid: (?:True|False|true|false)\nrotation_correction: (?:0|90|180|270)\nis_table: (?:True|False|true|false)\nis_diagram: (?:True|False|true|false)\n(?:---|---\n[\s\S]+)"
+            )
+
+        logger.debug(f"Built page query for {pdf_orig_path}-{page_num}")
+
+        try:
+            # Passing API key only for external servers that need authentication
+            if args.server and hasattr(args, "api_key"):
+                api_key = args.api_key
+            else:
+                api_key = None
+
+            async with max_concurrent_requests_limit:
+                status_code, response_body = await apost(COMPLETION_URL, json_data=query, api_key=api_key)
+
+            if status_code == 400:
+                raise ValueError(f"Got BadRequestError from server: {response_body}, skipping this response")
+            elif status_code == 429:
+                raise ConnectionError(f"Too many requests, doing exponential backoff")
+            elif status_code == 500:
+                raise ValueError(f"Got InternalServerError from server: {response_body}, skipping this response")
+            elif status_code != 200:
+                raise ValueError(f"Error http status {status_code}")
+
+            base_response_data = json.loads(response_body)
+
+            if base_response_data["usage"]["total_tokens"] > MODEL_MAX_CONTEXT:
+                raise ValueError(f"Response exceeded model_max_context of {MODEL_MAX_CONTEXT}, cannot use this response")
+
+            if base_response_data["choices"][0]["finish_reason"] != "stop":
+                raise ValueError("Response did not finish with reason code 'stop', cannot use this response")
+
+            metrics.add_metrics(
+                server_input_tokens=base_response_data["usage"].get("prompt_tokens", 0),
+                server_output_tokens=base_response_data["usage"].get("completion_tokens", 0),
+            )
+
+            model_response_markdown = base_response_data["choices"][0]["message"]["content"]
+
+            parser = FrontMatterParser(front_matter_class=PageResponse)
+            front_matter, text = parser._extract_front_matter_and_text(model_response_markdown)
+            page_response = parser._parse_front_matter(front_matter, text)
+
+            if not page_response.is_rotation_valid and attempt < MAX_RETRIES - 1:
+                logger.info(
+                    f"Got invalid_page rotation for {pdf_orig_path}-{page_num} attempt {attempt}, retrying with {page_response.rotation_correction} rotation"
+                )
+                # Add the rotation correction to the cumulative rotation
+                cumulative_rotation = (cumulative_rotation + page_response.rotation_correction) % 360
+                logger.info(f"Cumulative rotation is now {cumulative_rotation} degrees")
+                raise ValueError(f"invalid_page rotation for {pdf_orig_path}-{page_num}")
+
+            metrics.add_metrics(**{"completed_pages": 1, f"finished_on_attempt_{attempt}": 1})
+            await tracker.track_work(worker_id, f"{pdf_orig_path}-{page_num}", "finished")
+            return PageResult(
+                pdf_orig_path,
+                page_num,
+                page_response,
+                input_tokens=base_response_data["usage"].get("prompt_tokens", 0),
+                output_tokens=base_response_data["usage"].get("completion_tokens", 0),
+                is_fallback=False,
+            )
+        except (ConnectionError, OSError, asyncio.TimeoutError) as e:
+            logger.warning(f"Client error on attempt {attempt} for {pdf_orig_path}-{page_num}: {type(e)} {e}")
+
+            # Now we want to do exponential backoff, and not count this as an actual page retry
+            # Page retrys are supposed to be for fixing bad results from the model, but actual requests to vllm
+            # are supposed to work. Probably this means that the server is just restarting
+            sleep_delay = 10 * (2**exponential_backoffs)
+            exponential_backoffs += 1
+            logger.info(f"Sleeping for {sleep_delay} seconds on {pdf_orig_path}-{page_num} to allow server restart")
+            await asyncio.sleep(sleep_delay)
+        except asyncio.CancelledError:
+            logger.info(f"Process page {pdf_orig_path}-{page_num} cancelled")
+            await tracker.track_work(worker_id, f"{pdf_orig_path}-{page_num}", "cancelled")
+            raise
+        except json.JSONDecodeError as e:
+            logger.warning(f"JSON decode error on attempt {attempt} for {pdf_orig_path}-{page_num}: {e}")
+            attempt += 1
+        except ValueError as e:
+            logger.warning(f"ValueError on attempt {attempt} for {pdf_orig_path}-{page_num}: {type(e)} - {e}")
+            attempt += 1
+        except Exception as e:
+            logger.exception(f"Unexpected error on attempt {attempt} for {pdf_orig_path}-{page_num}: {type(e)} - {e}")
+            attempt += 1
+
+    logger.error(f"Failed to process {pdf_orig_path}-{page_num} after {MAX_RETRIES} attempts.")
+    metrics.add_metrics(failed_pages=1)
+    await tracker.track_work(worker_id, f"{pdf_orig_path}-{page_num}", "errored")
+
+    # This returns the fallback case, using pdftotext
+    return PageResult(
+        pdf_orig_path,
+        page_num,
+        PageResponse(
+            natural_text=get_anchor_text(pdf_local_path, page_num, pdf_engine="pdftotext"),
+            primary_language=None,
+            is_rotation_valid=True,
+            rotation_correction=0,
+            is_table=False,
+            is_diagram=False,
+        ),
+        input_tokens=0,
+        output_tokens=0,
+        is_fallback=True,
+    )
+
+
+>>>>>>> 69f4293 (add metrics, add is_text_clear)
 def is_tarball_path(path: str) -> bool:
     """Check if a path is a tarball based on extension."""
     lower = path.lower()
@@ -504,10 +701,17 @@ async def process_tarball(args, worker_id: int, tarball_path: str) -> list:
         logger.info(f"Worker {worker_id} extracted {len(pdf_files)} PDFs from {tarball_path}")
 
         # Process all PDFs concurrently
+<<<<<<< HEAD
         async with asyncio.TaskGroup() as tg:
             tasks = [tg.create_task(process_single_pdf(args, worker_id, src, local)) for src, local in pdf_files]
 
         dolma_docs = [t.result() for t in tasks if t.result() is not None]
+=======
+        tasks = [process_single_pdf(args, worker_id, src, local) for src, local in pdf_files]
+        results = await asyncio.gather(*tasks)
+
+        dolma_docs = [res for res in results if res is not None]
+>>>>>>> 69f4293 (add metrics, add is_text_clear)
         logger.info(f"Worker {worker_id} processed {len(dolma_docs)} PDFs from tarball {tarball_path}")
         return dolma_docs
     finally:
@@ -544,6 +748,7 @@ async def process_single_pdf(args, worker_id: int, pdf_orig_path: str, local_pdf
         page_tasks = []
         page_results = []
 
+<<<<<<< HEAD
         async with asyncio.TaskGroup() as tg:
             for page_num in range(1, num_pages + 1):
                 task = tg.create_task(process_page(args, worker_id, pdf_orig_path, local_pdf_path, page_num))
@@ -552,6 +757,13 @@ async def process_single_pdf(args, worker_id: int, pdf_orig_path: str, local_pdf
         # Collect the results from the entire task group, assuming no exceptions, if there is an exception propagated to this point in any page, it will abort the PDF itself
         page_results = [task.result() for task in page_tasks]
         assert all(page_result.is_valid for page_result in page_results)
+=======
+        for page_num in range(1, num_pages + 1):
+            page_tasks.append(process_page(args, worker_id, pdf_orig_path, local_pdf_path, page_num))
+
+        # Collect the results from the entire task group, assuming no exceptions, if there is an exception propagated to this point in any page, it will abort the PDF itself
+        page_results = await asyncio.gather(*page_tasks)
+>>>>>>> 69f4293 (add metrics, add is_text_clear)
 
         num_fallback_pages = sum(page_result.is_fallback for page_result in page_results)
 
@@ -650,6 +862,7 @@ def build_dolma_document(pdf_orig_path, page_results):
     return dolma_doc
 
 
+<<<<<<< HEAD
 def get_markdown_path(workspace: str, source_file: str) -> str:
     """
     Calculate the markdown output path for a given source file.
@@ -694,6 +907,8 @@ def get_markdown_path(workspace: str, source_file: str) -> str:
     return markdown_path
 
 
+=======
+>>>>>>> 69f4293 (add metrics, add is_text_clear)
 async def worker(args, work_queue: WorkQueue, worker_id):
     while True:
 
@@ -707,6 +922,7 @@ async def worker(args, work_queue: WorkQueue, worker_id):
         await tracker.clear_work(worker_id)
 
         try:
+<<<<<<< HEAD
             async with asyncio.TaskGroup() as tg:
                 dolma_tasks = []
                 for path in work_item.work_paths:
@@ -727,6 +943,24 @@ async def worker(args, work_queue: WorkQueue, worker_id):
                     # some dolma doc creations may have failed
                     result = None
 
+=======
+            dolma_tasks = []
+            for path in work_item.work_paths:
+                if is_tarball_path(path):
+                    # Tarball returns a list of docs, so we handle it specially
+                    dolma_tasks.append(process_tarball(args, worker_id, path))
+                else:
+                    dolma_tasks.append(process_pdf(args, worker_id, path))
+            logger.info(f"Created all tasks for {work_item.hash}")
+
+            results = await asyncio.gather(*dolma_tasks)
+            logger.info(f"Finished gather for worker on {work_item.hash}")
+
+            dolma_docs = []
+            for result in results:
+                # Originally we had try/except around task.result() here, but gather raises on first error
+                # so if we are here, all succeeded.
+>>>>>>> 69f4293 (add metrics, add is_text_clear)
                 if result is None:
                     continue
                 # process_tarball returns a list, process_pdf returns a single doc
@@ -873,9 +1107,13 @@ async def vllm_server_task(model_name_or_path, args, unknown_args=None):
             last_running_req = current_running
 
         if match := re.search(r"(?:Waiting|Pending):\s*(\d+)", line):
+<<<<<<< HEAD
             global vllm_queued_requests
             last_queue_req = int(match.group(1))
             vllm_queued_requests = last_queue_req
+=======
+            last_queue_req = int(match.group(1))
+>>>>>>> 69f4293 (add metrics, add is_text_clear)
             logger.info(f"vllm running req: {last_running_req} queue req: {last_queue_req}")
 
     async def read_stream(stream):
@@ -926,6 +1164,12 @@ async def vllm_server_host(model_name_or_path, args, unknown_args=None):
 
 
 async def vllm_server_ready(args):
+<<<<<<< HEAD
+=======
+    # logger.info("Skipping vllm server readiness check.")
+    # return
+
+>>>>>>> 69f4293 (add metrics, add is_text_clear)
     max_attempts = args.max_server_ready_timeout
     delay_sec = 1
     url = f"{args.server.rstrip('/')}/models"
@@ -991,6 +1235,7 @@ async def metrics_reporter(work_queue):
 def submit_beaker_job(args):
     from beaker import (  # type: ignore
         Beaker,
+<<<<<<< HEAD
         BeakerConstraints,
         BeakerEnvVar,
         BeakerExperimentSpec,
@@ -1007,6 +1252,24 @@ def submit_beaker_job(args):
     Beaker.TIMEOUT = 60
     b = Beaker.from_env(default_workspace=args.beaker_workspace)
     owner = b.user_name
+=======
+        Constraints,
+        EnvVar,
+        ExperimentSpec,
+        ImageSource,
+        Priority,
+        ResultSpec,
+        RetrySpec,
+        SecretNotFound,
+        TaskContext,
+        TaskResources,
+        TaskSpec,
+    )
+
+    b = Beaker.from_env(default_workspace=args.beaker_workspace)
+    account = b.account.whoami()
+    owner = account.name
+>>>>>>> 69f4293 (add metrics, add is_text_clear)
     beaker_image = f"jakep/olmocr-inference-{VERSION}"
 
     task_name = f"olmocr-{os.path.basename(args.workspace.rstrip('/'))}"
@@ -1018,10 +1281,17 @@ def submit_beaker_job(args):
     args_list = [arg for i, arg in enumerate(args_list) if not (arg.startswith("--pdfs") or (i > 0 and args_list[i - 1] == "--pdfs"))]
 
     try:
+<<<<<<< HEAD
         b.secret.get(f"{owner}-WEKA_ACCESS_KEY_ID")
         b.secret.get(f"{owner}-WEKA_SECRET_ACCESS_KEY")
         b.secret.get(f"{owner}-AWS_CREDENTIALS_FILE")
     except BeakerSecretNotFound:
+=======
+        b.secret.get(f"{owner}-WEKA_ACCESS_KEY_ID", args.beaker_workspace)
+        b.secret.get(f"{owner}-WEKA_SECRET_ACCESS_KEY", args.beaker_workspace)
+        b.secret.get(f"{owner}-AWS_CREDENTIALS_FILE", args.beaker_workspace)
+    except SecretNotFound:
+>>>>>>> 69f4293 (add metrics, add is_text_clear)
         print(
             f"Expected beaker secrets for accessing Weka and S3 are not found. Are you okay to write those to your beaker workspace {args.beaker_workspace}? [y/n]"
         )
@@ -1030,6 +1300,7 @@ def submit_beaker_job(args):
             print("Exiting...")
             sys.exit(1)
 
+<<<<<<< HEAD
         b.secret.write(f"{owner}-WEKA_ACCESS_KEY_ID", os.environ.get("WEKA_ACCESS_KEY_ID", ""))
         b.secret.write(f"{owner}-WEKA_SECRET_ACCESS_KEY", os.environ.get("WEKA_SECRET_ACCESS_KEY", ""))
         b.secret.write(
@@ -1053,6 +1324,32 @@ def submit_beaker_job(args):
         b.secret.get("OE_DATA_GCS_SA_KEY")
         env_var_secrets.append(BeakerEnvVar(name="GOOGLE_APPLICATION_CREDENTIALS_FILE", secret="OE_DATA_GCS_SA_KEY"))
     except BeakerSecretNotFound:
+=======
+        b.secret.write(f"{owner}-WEKA_ACCESS_KEY_ID", os.environ.get("WEKA_ACCESS_KEY_ID", ""), args.beaker_workspace)
+        b.secret.write(f"{owner}-WEKA_SECRET_ACCESS_KEY", os.environ.get("WEKA_SECRET_ACCESS_KEY", ""), args.beaker_workspace)
+        b.secret.write(
+            f"{owner}-AWS_CREDENTIALS_FILE",
+            open(os.path.join(os.path.expanduser("~"), ".aws", "credentials")).read(),
+            args.beaker_workspace,
+        )
+
+    env_var_secrets = [
+        EnvVar(name="WEKA_ACCESS_KEY_ID", secret=f"{owner}-WEKA_ACCESS_KEY_ID"),
+        EnvVar(name="WEKA_SECRET_ACCESS_KEY", secret=f"{owner}-WEKA_SECRET_ACCESS_KEY"),
+        EnvVar(name="AWS_CREDENTIALS_FILE", secret=f"{owner}-AWS_CREDENTIALS_FILE"),
+    ]
+
+    try:
+        b.secret.get("OLMOCR_PREVIEW_HF_TOKEN", args.beaker_workspace)
+        env_var_secrets.append(EnvVar(name="HF_TOKEN", secret="OLMOCR_PREVIEW_HF_TOKEN"))
+    except SecretNotFound:
+        pass
+
+    try:
+        b.secret.get("OE_DATA_GCS_SA_KEY", args.beaker_workspace)
+        env_var_secrets.append(EnvVar(name="GOOGLE_APPLICATION_CREDENTIALS_FILE", secret="OE_DATA_GCS_SA_KEY"))
+    except SecretNotFound:
+>>>>>>> 69f4293 (add metrics, add is_text_clear)
         print("Input the olmo-gcs SA key if you would like to load weights from gcs (end with a double newline):")
         lines = []
         prev_empty = False
@@ -1063,6 +1360,7 @@ def submit_beaker_job(args):
             lines.append(line)
         gcs_sa_key = "\n".join(lines[:-1]).strip()  # Remove the last empty line
         if gcs_sa_key:
+<<<<<<< HEAD
             b.secret.write("OE_DATA_GCS_SA_KEY", gcs_sa_key)
             env_var_secrets.append(BeakerEnvVar(name="GOOGLE_APPLICATION_CREDENTIALS_FILE", secret="OE_DATA_GCS_SA_KEY"))
 
@@ -1072,10 +1370,22 @@ def submit_beaker_job(args):
         description=task_name,
         tasks=[
             BeakerTaskSpec(
+=======
+            b.secret.write("OE_DATA_GCS_SA_KEY", gcs_sa_key, args.beaker_workspace)
+            env_var_secrets.append(EnvVar(name="GOOGLE_APPLICATION_CREDENTIALS_FILE", secret="OE_DATA_GCS_SA_KEY"))
+
+    # Create the experiment spec
+    experiment_spec = ExperimentSpec(
+        budget="ai2/oe-base",
+        description=task_name,
+        tasks=[
+            TaskSpec(
+>>>>>>> 69f4293 (add metrics, add is_text_clear)
                 name=task_name,
                 propagate_failure=False,
                 propagate_preemption=False,
                 replicas=args.beaker_gpus,
+<<<<<<< HEAD
                 context=BeakerTaskContext(
                     priority=BeakerJobPriority[args.beaker_priority],
                     preemptible=True,
@@ -1099,6 +1409,27 @@ def submit_beaker_job(args):
     workload = b.experiment.create(spec=experiment_spec)
 
     print(f"Experiment URL: https://beaker.org/ex/{workload.experiment.id}")
+=======
+                context=TaskContext(
+                    priority=Priority(args.beaker_priority),
+                    preemptible=True,
+                ),
+                image=ImageSource(beaker=beaker_image),
+                command=["python", "-m", "olmocr.pipeline"] + args_list,
+                env_vars=[EnvVar(name="BEAKER_JOB_NAME", value=task_name), EnvVar(name="OWNER", value=owner), EnvVar(name="HF_HUB_OFFLINE", value="1")]
+                + env_var_secrets,
+                resources=TaskResources(gpu_count=1, memory="150GiB"),  # Have to set a memory limit, otherwise VLLM may use too much on its own
+                constraints=Constraints(cluster=args.beaker_cluster if isinstance(args.beaker_cluster, list) else [args.beaker_cluster]),
+                result=ResultSpec(path="/noop-results"),
+            )
+        ],
+        retry=RetrySpec(allowed_task_retries=10),
+    )
+
+    experiment_data = b.experiment.create(spec=experiment_spec, workspace=args.beaker_workspace)
+
+    print(f"Experiment URL: https://beaker.org/ex/{experiment_data.id}")
+>>>>>>> 69f4293 (add metrics, add is_text_clear)
 
 
 def print_stats(args, root_work_queue):
@@ -1168,7 +1499,12 @@ def print_stats(args, root_work_queue):
             all_processed.update(paths)
 
     d, p, o, c = totals["docs"], totals["pages"], totals["output_tokens"], max(1, completed_items)
+<<<<<<< HEAD
     print(f"""
+=======
+    print(
+        f"""
+>>>>>>> 69f4293 (add metrics, add is_text_clear)
 Work Items Status:
 Total work items: {total_items:,}
 Completed items: {completed_items:,}
@@ -1192,7 +1528,12 @@ Total tokens in long context documents: {totals['long_tokens']:,}
 
 English-only documents (>50% pages with 'en'): {totals['en_docs']:,}
 Total output tokens in English-only documents: {totals['en_tokens']:,}
+<<<<<<< HEAD
 Projected English-only output tokens: {round(totals['en_tokens'] / c * total_items):,}""")
+=======
+Projected English-only output tokens: {round(totals['en_tokens'] / c * total_items):,}"""
+    )
+>>>>>>> 69f4293 (add metrics, add is_text_clear)
 
 
 async def main():
@@ -1432,9 +1773,42 @@ async def main():
         args.model = "olmocr"  # Internal server always uses this name for the model, for supporting weird local model paths
         logger.info(f"Using internal server at {args.server}")
     else:
+<<<<<<< HEAD
         logger.info(f"Using external server at {args.server}")
         model_name_or_path = None
 
+=======
+        # Check if server url ends with /v1
+        args.server = args.server.rstrip('/')
+        if not args.server.endswith("/v1"):
+            args.server += "/v1"
+
+        logger.info(f"Using external server at {args.server}")
+        model_name_or_path = None
+
+        # Auto-detect model from server
+        try:
+            logger.info("Attempting to auto-detect model from server...")
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(f"{args.server}/models")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    models = data.get('data', [])
+                    if models:
+                        # Prefer the one that might match the default if multiple, but here just take the first one
+                        detected_model = models[0]['id']
+                        logger.info(f"Detected model on server: {detected_model}")
+                        if args.model != detected_model:
+                            logger.info(f"Updating args.model from {args.model} to {detected_model}")
+                            args.model = detected_model
+                    else:
+                        logger.warning("No models returned by server")
+                else:
+                    logger.warning(f"Server returned status {resp.status_code} when fetching models")
+        except Exception as e:
+            logger.warning(f"Failed to auto-detect model from server: {e}")
+
+>>>>>>> 69f4293 (add metrics, add is_text_clear)
     # Initialize the work queue
     qsize = await work_queue.initialize_queue()
 
