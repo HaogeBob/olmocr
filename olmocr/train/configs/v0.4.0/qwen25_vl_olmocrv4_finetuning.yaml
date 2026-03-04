@@ -28,8 +28,8 @@ model:
 dataset:
 
   train:
-    - name: finetuning_data_7000
-      root_dir: /data/A800/cwh/data_clear_check/images_pdf_md
+    - name: finetuning_data_1000
+      root_dir: /data/A800/cwh/detect_ocr_data/without_clear_tag/training_data
       pipeline: &basic_pipeline
         - name: FrontMatterParser
           front_matter_class: PageResponse
@@ -54,18 +54,18 @@ dataset:
 
   eval:
     - name: eval_finetuning_data
-      root_dir: /data/A800/cwh/detect_ocr_data/testing_data
+      root_dir: /data/A800/cwh/detect_ocr_data/without_clear_tag/testing_data
       pipeline: *basic_pipeline
 
 # Training configuration
 training:
-  output_dir: /data/A800/cwh/detect_ocr_data/olmocr-finetuning
-  num_train_epochs: 3
+  output_dir: /data/A800/cwh/detect_ocr_data/olmocr-finetuning_allclear1000
+  num_train_epochs: 20
   
   # Batch size and accumulation
   per_device_train_batch_size: 1
   per_device_eval_batch_size: 1
-  gradient_accumulation_steps: 4
+  gradient_accumulation_steps: 16
 
   gradient_checkpointing: False
 
@@ -93,10 +93,10 @@ training:
   
   # Evaluation and checkpointing
   evaluation_strategy: steps
-  eval_steps: 300
+  eval_steps: 50
   save_strategy: steps
-  save_steps: 300
-  save_total_limit: 20
+  save_steps: 50
+  save_total_limit: 5
   load_best_model_at_end: false # Needs to be false because it has a problem restoring checkpoints for some reason
   # metric_for_best_model: eval_eval_finetuning_data_loss
   # greater_is_better: false

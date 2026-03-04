@@ -342,7 +342,7 @@ class NewYamlFinetuningPromptWithAnchoring(PipelineStep):
             f"Attached is one page of a document, as well as some raw textual content that was previously extracted for it. "
             f"Just return the plain text representation of this document as if you were reading it naturally. Convert equations to LateX and tables to markdown.\n"
             f"RAW_TEXT_START\n{sample['anchor_text']}\nRAW_TEXT_END\n"
-            f"Return your output as markdown, with a front matter section on top specifying values for the is_text_clear, primary_language, is_rotation_valid, rotation_correction, is_table, and is_diagram parameters."
+            f"Return your output as markdown, with a front matter section on top specifying values for the primary_language, is_rotation_valid, rotation_correction, is_table, and is_diagram parameters."
         )
         return sample
 
@@ -366,7 +366,6 @@ class FrontMatterOutputFormat(PipelineStep):
 
         sample["response"] = (
             f"""---
-is_text_clear: {page_data.is_text_clear}
 primary_language: {page_data.primary_language}
 is_rotation_valid: {page_data.is_rotation_valid}
 rotation_correction: {page_data.rotation_correction}
@@ -390,7 +389,6 @@ class JSONOutputFormat(PipelineStep):
 
         sample["response"] = json.dumps(
             {
-                "is_text_clear": page_data.is_text_clear,
                 "primary_language": page_data.primary_language,
                 "is_rotation_valid": page_data.is_rotation_valid,
                 "rotation_correction": page_data.rotation_correction,
@@ -434,7 +432,6 @@ class LatexBracketNormalizer(PipelineStep):
         # Update the page_data with normalized text
         # Since PageResponse is frozen, we need to create a new instance
         new_page_data = PageResponse(
-            is_text_clear=page_data.is_text_clear,
             primary_language=page_data.primary_language,
             is_rotation_valid=page_data.is_rotation_valid,
             rotation_correction=page_data.rotation_correction,
@@ -496,7 +493,6 @@ class RotationAugmentation(PipelineStep):
             correction = 90
 
         new_page_data = PageResponse(
-            is_text_clear=page_data.is_text_clear,
             primary_language=page_data.primary_language,
             is_rotation_valid=False,  # Mark as invalid since we rotated it
             rotation_correction=correction,  # The correction needed to fix it

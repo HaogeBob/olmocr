@@ -35,6 +35,26 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+LOG_FORMAT = "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
+DATE_FORMAT = "%m/%d/%Y %H:%M:%S"
+
+
+def setup_file_logging(log_dir: str, filename: str = "train.log") -> str:
+    """Attach a file handler so logs are also persisted under the run directory."""
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, filename)
+    abs_log_path = os.path.abspath(log_path)
+
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers:
+        if isinstance(handler, logging.FileHandler) and getattr(handler, "baseFilename", None) == abs_log_path:
+            return log_path
+
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT))
+    root_logger.addHandler(file_handler)
+    return log_path
 
 
 def prepare_lora_model(model: torch.nn.Module, model_cfg) -> torch.nn.Module:
@@ -291,20 +311,6 @@ def _extract_front_matter_and_text(markdown_content: str) -> tuple[Dict[str, Any
     return {}, markdown_content.strip()
 
 
-def _parse_is_text_clear(front_matter: Dict[str, Any]) -> Optional[bool]:
-    value = front_matter.get("is_text_clear", None)
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, np.integer)):
-        if value in {0, 1}:
-            return bool(value)
-    if isinstance(value, str):
-        lower = value.strip().lower()
-        if lower in {"true", "false"}:
-            return lower == "true"
-    return None
-
-
 def evaluate_model(
     model: torch.nn.Module,
     eval_dataloaders: Dict[str, DataLoader],
@@ -319,8 +325,6 @@ def evaluate_model(
         total_loss = 0.0
         total_match_rate = 0.0
         total_char_acc = 0.0
-        total_text_clear = 0
-        correct_text_clear = 0
         num_batches = 0
         num_gen_samples = 0
 
@@ -385,15 +389,8 @@ def evaluate_model(
                             target_ids = lbl[lbl != -100]
                             target_text = processor.decode(target_ids, skip_special_tokens=True)
 
-                            pred_front_matter, pred_body = _extract_front_matter_and_text(pred_text)
-                            target_front_matter, target_body = _extract_front_matter_and_text(target_text)
-
-                            pred_is_text_clear = _parse_is_text_clear(pred_front_matter)
-                            target_is_text_clear = _parse_is_text_clear(target_front_matter)
-                            if isinstance(target_is_text_clear, bool):
-                                total_text_clear += 1
-                                if pred_is_text_clear is not None and pred_is_text_clear == target_is_text_clear:
-                                    correct_text_clear += 1
+                            _, pred_body = _extract_front_matter_and_text(pred_text)
+                            _, target_body = _extract_front_matter_and_text(target_text)
                             
                             # Calculate Metric (Levenshtein based Match Rate)
                             dist = levenshtein_distance(pred_body, target_body)
@@ -419,9 +416,6 @@ def evaluate_model(
             eval_metrics[f"eval_{dataset_name}_match_rate"] = avg_match_rate
             # New metric
             eval_metrics[f"eval_{dataset_name}_char_acc"] = avg_char_acc
-            if total_text_clear > 0:
-                eval_metrics[f"eval_{dataset_name}_is_text_clear_acc"] = correct_text_clear / total_text_clear
-                logger.info(f"Eval {dataset_name} is_text_clear_acc: {eval_metrics[f'eval_{dataset_name}_is_text_clear_acc']:.4f}")
             
             logger.info(f"Eval {dataset_name} match_rate: {avg_match_rate:.4f}")
             logger.info(f"Eval {dataset_name} char_acc: {avg_char_acc:.4f}")
@@ -496,12 +490,8 @@ def main():
         os.environ["WANDB_PROJECT"] = config.project_name
         logger.info(f"Setting WANDB_PROJECT to: {config.project_name}")
 
-    # Initialize tensorboard writer
+    # Initialize tensorboard writer (after output/log directories are created)
     writer = None
-    if "wandb" in config.training.report_to or "tensorboard" in config.training.report_to:
-        log_dir = os.path.join(config.training.output_dir, config.run_name, "logs")
-        writer = SummaryWriter(log_dir=log_dir)
-        logger.info(f"Initialized TensorBoard writer at {log_dir}")
 
     # Load processor for tokenization
     logger.info(f"Loading processor: {config.model.name}")
@@ -584,6 +574,15 @@ def main():
     full_output_dir = os.path.join(config.training.output_dir, config.run_name)
     logger.info(f"Setting output directory to: {full_output_dir}")
     os.makedirs(full_output_dir, exist_ok=True)
+
+    # Ensure logs are always persisted under the run directory
+    log_dir = os.path.join(full_output_dir, "logs")
+    train_log_path = setup_file_logging(log_dir)
+    logger.info(f"Saving Python logger output to: {train_log_path}")
+
+    if "wandb" in config.training.report_to or "tensorboard" in config.training.report_to:
+        writer = SummaryWriter(log_dir=log_dir)
+        logger.info(f"Initialized TensorBoard writer at {log_dir}")
 
     # Check for existing checkpoints if any
     found_resumable_checkpoint = None
